@@ -156,6 +156,9 @@ func (m *FileCache) inodeChildren(node *inode) (map[string]*inode, backend.Error
 	path := m.getStoragePath(node.path(), DIR_SUFFIX)
 	var err error
 	node.children, err = loadDirFromFile(path)
+	for _, child := range node.children {
+		child.parent = node
+	}
 	if err != nil {
 		// need to convert into I/O error: we can’t read the cache
 		return nil, backend.NewBackendError(
@@ -257,9 +260,9 @@ func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
 
 	if node.children != nil {
 		// we need to merge
-		unseenmap := make(map[string]bool)
-		for k, _ := range node.children {
-			unseenmap[k] = true
+		unseenmap := make(map[string]*inode)
+		for k, child := range node.children {
+			unseenmap[k] = child
 		}
 
 		log.Printf("FileCache: synchronizing %d items into dir with %d items",
@@ -283,7 +286,8 @@ func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
 
 		log.Printf("FileCache: removing %d stale items from dir", len(unseenmap))
 
-		for k, _ := range unseenmap {
+		for k, child := range unseenmap {
+			m.deleteRecursively(child, child.path())
 			delete(node.children, k)
 		}
 	} else {
@@ -528,4 +532,41 @@ func (m *FileCache) FetchLink(path string) (string, backend.Error) {
 	}
 
 	return string(dest), nil
+}
+
+func (m *FileCache) deleteRecursively(node *inode, path string) {
+	log.Printf("FileCache: deleteRecursively: at %#v, inode %v", path, node)
+
+	children, _ := m.inodeChildren(node)
+	if children != nil {
+		for _, child := range children {
+			m.deleteRecursively(
+				child,
+				filepath.Join(path, child.name),
+			)
+		}
+	}
+
+	// FIXME: delete file metadata
+	mode := node.Mode()
+	storage_path_base := m.getStoragePath(path, "")
+	if mode&syscall.S_IFDIR != 0 {
+		// is a directory, delete directory
+		os.Remove(storage_path_base + DIR_SUFFIX)
+	} else if mode&syscall.S_IFLNK != 0 {
+		os.Remove(storage_path_base + LINK_SUFFIX)
+	}
+}
+
+func (m *FileCache) Delete(path string) {
+	log.Printf("FileCache: deleting %#v recursively", path)
+
+	node, err := m.getInode(path)
+	if err != nil {
+		// appears to not be cached
+		return
+	}
+
+	m.deleteRecursively(node, path)
+	delete(node.parent.children, node.name)
 }

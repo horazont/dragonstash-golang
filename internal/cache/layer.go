@@ -29,6 +29,10 @@ func (m *CacheLayer) Lstat(path string) (backend.FileStat, backend.Error) {
 	stat, err := m.fs.Lstat(path)
 	if err == nil {
 		m.cache.PutAttr(path, stat)
+	} else {
+		// FIXME: check for connectivity errors and fall back to cache
+		// instead of deleting it
+		m.cache.Delete(path)
 	}
 	return stat, err
 }
@@ -39,8 +43,9 @@ func (m *CacheLayer) OpenDir(path string) ([]backend.DirEntry, backend.Error) {
 	} else {
 		entries, err := m.fs.OpenDir(path)
 		// we don’t cache errors, for now
+		// FIXME: check for connectivity errors
 		if err != nil {
-			m.cache.DelDir(path)
+			m.cache.Delete(path)
 			return entries, err
 		}
 
@@ -56,6 +61,10 @@ func (m *CacheLayer) Readlink(path string) (string, backend.Error) {
 		dest, err := m.fs.Readlink(path)
 		if err == nil {
 			m.cache.PutLink(path, dest)
+		} else {
+			// FIXME: check for connectivity errors and fall back to
+			// cache
+			m.cache.Delete(path)
 		}
 		return dest, err
 	}
