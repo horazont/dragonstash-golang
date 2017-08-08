@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -18,10 +19,30 @@ import (
 
 const (
 	ROOT_INODE_NAME = "root.inode"
+	ROOT_STATE_NAME = "root.state"
 	DIR_SUFFIX      = ".dir"
-	FILE_SUFFIX     = ".file"
+	FILE_SUFFIX     = ".data"
 	LINK_SUFFIX     = ".link"
+	BLOCKMAP_SUFFIX = ".blocks"
 )
+
+type quotaMetadata struct {
+	BlocksUsed  uint64 `toml:"blocks_used"`
+	BlocksTotal uint64 `toml:"blocks_total"`
+}
+
+type fileMetadata struct {
+	Blocks     uint64 `toml:"blocks_used"`
+	UniquePath string `toml:"unique_path"`
+	SyncMtime  uint64 `toml:"sync_mtime"`
+	SyncSize   uint64 `toml:"sync_size"`
+	fileHandle *FileHandle
+}
+
+type metadata struct {
+	Quota quotaMetadata           `toml:"quota"`
+	Files map[string]fileMetadata `toml:"files"`
+}
 
 type inode struct {
 	name     string
@@ -125,8 +146,12 @@ func (m *dummyStat) Mode() uint32 {
 }
 
 type FileCache struct {
-	root_dir  string
-	root_node *inode
+	lock          *sync.Mutex
+	root_dir      string
+	root_node     *inode
+	metadata      metadata
+	metadataStale bool
+	staleInodes   map[*inode]bool
 }
 
 func NewFileCache(root string) *FileCache {
@@ -139,9 +164,19 @@ func NewFileCache(root string) *FileCache {
 		}
 	}
 
+	metadata := metadata{}
+	f, err := os.Open(filepath.Join(root, ROOT_STATE_NAME))
+	if err == nil {
+		defer f.Close()
+		toml.DecodeReader(f, &metadata)
+	}
+
 	return &FileCache{
-		root_dir:  root,
-		root_node: root_node,
+		lock:        new(sync.Mutex),
+		root_dir:    root,
+		root_node:   root_node,
+		metadata:    metadata,
+		staleInodes: make(map[*inode]bool),
 	}
 }
 
@@ -301,6 +336,7 @@ func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
 			}
 		}
 	}
+	m.markInodeStale(node)
 }
 
 func (m *FileCache) getStoragePath(path string, suffix string) string {
@@ -315,16 +351,16 @@ func (m *FileCache) getStoragePath(path string, suffix string) string {
 func (m *FileCache) openStorage(
 	storage_path string,
 	write bool,
-) (f *os.File, err error) {
+) (f *safeFile, err error) {
 	if write {
 		err = os.MkdirAll(filepath.Dir(storage_path), 0700)
 		if err != nil {
 			log.Printf("FileCache: could not create cache directories: %s", err)
 			return nil, err
 		}
-		f, err = os.Create(storage_path)
+		f, err = CreateSafe(storage_path)
 	} else {
-		f, err = os.Open(storage_path)
+		f, err = OpenSafe(storage_path)
 	}
 
 	if err != nil {
@@ -339,6 +375,9 @@ func (m *FileCache) PutDir(
 	fs backend.FileSystem,
 	entries []backend.DirEntry,
 ) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	parent_inode, err := m.getInodeAutofill(path, fs)
 	if err != nil {
 		// parent not in cache yet? -> discard
@@ -354,7 +393,6 @@ func (m *FileCache) PutDir(
 	log.Printf("PutDir: writing inode %s %v",
 		parent_inode.name,
 		parent_inode)
-	m.writeDirectory(parent_inode)
 
 	// log.Printf("FileCache: request to store %d entries for %s", len(entries), path)
 	// cachepath := m.getStoragePath(path)
@@ -373,6 +411,8 @@ func (m *FileCache) PutDir(
 	// }
 	// encoder := toml.NewEncoder(bufio.NewWriter(dest))
 	// encoder.Encode(&cache)
+
+	m.writeback()
 }
 
 func (m *FileCache) writeDirectory(node *inode) {
@@ -416,7 +456,7 @@ func (m *FileCache) writeDirectory(node *inode) {
 
 func (m *FileCache) writeRootInode() {
 	storage_path := filepath.Join(m.root_dir, ROOT_INODE_NAME)
-	f, err := os.Create(storage_path)
+	f, err := CreateSafe(storage_path)
 	if err != nil {
 		log.Printf(
 			"writeRootInode: failed to open inode data for writing"+
@@ -445,11 +485,41 @@ func (m *FileCache) writeRootInode() {
 			"writeDirectory: failed to write: %s\n",
 			err,
 		)
-		os.Remove(storage_path)
+		f.Abort()
+		return
 	}
+	f.Close()
+}
+
+func (m *FileCache) writeMetadata() {
+	storage_path := filepath.Join(m.root_dir, ROOT_STATE_NAME)
+	f, err := CreateSafe(storage_path)
+	if err != nil {
+		log.Printf(
+			"writeMetadata: failed to open inode data for writing"+
+				": %s\n",
+			err,
+		)
+		return
+	}
+
+	encoder := toml.NewEncoder(f)
+	err = encoder.Encode(&m.metadata)
+	if err != nil {
+		log.Printf(
+			"writeMetadata: failed to write: %s\n",
+			err,
+		)
+		f.Abort()
+		return
+	}
+	f.Close()
 }
 
 func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	inode, err := m.getInode(path)
 	if err != nil {
 		return nil, err
@@ -472,11 +542,10 @@ func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
 	return result, nil
 }
 
-func (m *FileCache) DelDir(path string) {
-	log.Printf("FileCache: request to delete cache for %s", path)
-}
-
 func (m *FileCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	inode, err := m.getInode(path)
 	if err != nil {
 		return nil, err
@@ -486,6 +555,9 @@ func (m *FileCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
 }
 
 func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	inode, err := m.getInode(path)
 	if err != nil {
 		log.Printf("PutAttr: getInode failed for %#v: %s", path, err)
@@ -495,7 +567,8 @@ func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
 
 	if path == "" {
 		// root inode
-		m.writeRootInode()
+		m.markInodeStale(inode)
+		m.writeback()
 	}
 }
 
@@ -505,12 +578,13 @@ func (m *FileCache) PutLink(path string, dest string) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
 
 	_, err = f.WriteString(dest)
 	if err != nil {
-		os.Remove(storage_path)
+		f.Abort()
+		return
 	}
+	f.Close()
 }
 
 func (m *FileCache) FetchLink(path string) (string, backend.Error) {
@@ -556,10 +630,15 @@ func (m *FileCache) deleteRecursively(node *inode, path string) {
 	} else if mode&syscall.S_IFLNK != 0 {
 		os.Remove(storage_path_base + LINK_SUFFIX)
 	}
+
+	delete(m.staleInodes, node)
 }
 
 func (m *FileCache) Delete(path string) {
 	log.Printf("FileCache: deleting %#v recursively", path)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
 	node, err := m.getInode(path)
 	if err != nil {
@@ -569,4 +648,31 @@ func (m *FileCache) Delete(path string) {
 
 	m.deleteRecursively(node, path)
 	delete(node.parent.children, node.name)
+	m.markInodeStale(node.parent)
+	m.writeback()
+}
+
+func (m *FileCache) writeback() {
+	log.Printf(
+		"writeback: %d stale inodes; metadata stale: %s",
+		len(m.staleInodes),
+		m.metadataStale,
+	)
+
+	if m.metadataStale {
+		m.writeMetadata()
+	}
+
+	for node, _ := range m.staleInodes {
+		if node == m.root_node {
+			m.writeRootInode()
+		} else if node.Mode()&syscall.S_IFDIR != 0 {
+			m.writeDirectory(node)
+		}
+		delete(m.staleInodes, node)
+	}
+}
+
+func (m *FileCache) markInodeStale(node *inode) {
+	m.staleInodes[node] = true
 }
