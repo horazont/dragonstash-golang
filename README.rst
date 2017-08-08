@@ -25,15 +25,26 @@ Stage 2
 
 * Block-wise caching instead of full-file caching
 * Support for online writes and other changes to the file system
+* Support for online locking of files
 
 
 Stage 3
 -------
 
 * Direct use of SFTP as source (without sshfs inbetween)
+* Support for other eviction styles
 
 
 Stage 4
 -------
 
 * Support for offline writes and other changes to the file system
+* Support for unsafe(!) offline locking of files, for single-user sources
+
+Stage 5
+-------
+
+Anything goes here, this is playground land.
+
+* Maybe machine learning to predict access patterns for different file types
+* Maybe eviction patterns based on access patterns
