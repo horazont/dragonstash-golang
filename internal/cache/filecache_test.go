@@ -43,3 +43,59 @@ func TestInodePath(t *testing.T) {
 		assertEqualStr(t, child11.path(), "foo/d1")
 	})
 }
+
+func TestTruncateRead(t *testing.T) {
+	t.Run("aligned read", func(t *testing.T) {
+		assertEqualInt64(
+			t,
+			truncateRead(
+				0,
+				8192,
+				0,
+			),
+			4096,
+		)
+
+		assertEqualInt64(
+			t,
+			truncateRead(
+				0,
+				4096*4,
+				2,
+			),
+			4096*3,
+		)
+
+		assertEqualInt64(
+			t,
+			truncateRead(
+				4096,
+				4096*4,
+				2,
+			),
+			4096*2,
+		)
+	})
+
+	t.Run("unaligned read", func(t *testing.T) {
+		assertEqualInt64(
+			t,
+			truncateRead(
+				13,
+				4100,
+				0,
+			),
+			4096-13,
+		)
+
+		assertEqualInt64(
+			t,
+			truncateRead(
+				7491,
+				1000,
+				1,
+			),
+			701,
+		)
+	})
+}

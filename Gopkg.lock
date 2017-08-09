@@ -8,6 +8,12 @@
   version = "v0.3.0"
 
 [[projects]]
+  branch = "master"
+  name = "github.com/edsrzf/mmap-go"
+  packages = ["."]
+  revision = "0bce6a6887123b67a60366d2c9fe2dfb74289d2e"
+
+[[projects]]
   name = "github.com/hanwen/go-fuse"
   packages = ["fuse","fuse/nodefs","fuse/pathfs","splice"]
   revision = "5690be47d614355a22931c129e1075c25a62e9ac"
@@ -16,6 +22,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "f8fa27c386b7ebd7614c70bcef343337e74a0b0563093da48f4165ee48ca3cc3"
+  inputs-digest = "f722b91d95f2769c1d78815c7e03910241f7ea2a852c59523dfb692016df88c7"
   solver-name = "gps-cdcl"
   solver-version = 1

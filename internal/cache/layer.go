@@ -1,6 +1,11 @@
 package cache
 
-import "github.com/horazont/dragonstash/internal/backend"
+import (
+	"log"
+	"syscall"
+
+	"github.com/horazont/dragonstash/internal/backend"
+)
 
 type CacheLayer struct {
 	cache Interface
@@ -71,5 +76,105 @@ func (m *CacheLayer) Readlink(path string) (string, backend.Error) {
 }
 
 func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Error) {
-	return m.fs.OpenFile(path, flags)
+	f, err := m.fs.OpenFile(path, flags)
+	if err != nil && !IsUnavailableError(err) {
+		return f, err
+	}
+
+	cachef, err := m.cache.OpenForStore(path)
+	if err != nil {
+		log.Printf("failed to open cache store for %#v: %s",
+			path,
+			err,
+		)
+	}
+
+	if f == nil && cachef == nil {
+		return nil, backend.WrapError(syscall.EIO)
+	}
+
+	return wrapFile(cachef, f, m.cache.BlockSize()), nil
+}
+
+type CacheLayerFile struct {
+	blocksize int64
+	cacheside CachedFileHandle
+	fsside    backend.File
+}
+
+func wrapFile(cacheside CachedFileHandle, fsside backend.File, blocksize int64) backend.File {
+	return &CacheLayerFile{
+		blocksize: blocksize,
+		cacheside: cacheside,
+		fsside:    fsside,
+	}
+}
+
+func alignRead(
+	position int64,
+	length int64,
+	blocksize int64,
+) (new_position int64, new_length int64, offset int64) {
+	new_position = position
+	new_length = length
+	offset = 0
+	if shift := position % blocksize; shift != 0 {
+		offset += shift
+		new_length += shift
+		new_position -= shift
+	}
+	if add := new_length % blocksize; add != 0 {
+		new_length += blocksize - add
+	}
+	return new_position, new_length, offset
+}
+
+func (m *CacheLayerFile) Read(dest []byte, position int64) (int, backend.Error) {
+	if m.cacheside == nil {
+		return m.fsside.Read(dest, position)
+	}
+
+	if m.fsside == nil {
+		return m.cacheside.ReadData(dest, position)
+	}
+
+	new_position, new_length, offset := alignRead(
+		position,
+		int64(len(dest)),
+		m.blocksize,
+	)
+
+	need_copy := new_length != int64(len(dest))
+	var buffer []byte = dest
+	if need_copy {
+		buffer = make([]byte, new_length)
+	}
+
+	n, err := m.fsside.Read(buffer, new_position)
+	if err != nil {
+		if IsUnavailableError(err) {
+			// read data from cache instead
+			return m.cacheside.ReadData(dest, position)
+		} else {
+			// read error, do not cache the data
+			// TODO: un-cache any cached data in that range
+			return n, err
+		}
+	}
+	m.cacheside.PutReadData(buffer[:n], new_position, int64(n) < new_length)
+
+	start := offset
+	end := offset + int64(len(dest))
+	if start > int64(n) {
+		start = 0
+		end = 0
+		n = 0
+	} else if end > int64(n) {
+		end = int64(n)
+		n = int(end - start)
+	}
+
+	copy(dest, buffer[start:end])
+
+	return n, err
 }

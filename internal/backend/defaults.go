@@ -75,17 +75,17 @@ func (m *DefaultFileSystem) Join(elems ...string) string {
 }
 
 func (m *DefaultFileSystem) Lstat(path string) (FileStat, Error) {
-	return nil, NewBackendError("not implemented", syscall.ENOSYS)
+	return nil, NewBackendError("dummy source", syscall.EIO)
 }
 
 func (m *DefaultFileSystem) OpenDir(path string) ([]DirEntry, Error) {
-	return nil, NewBackendError("not implemented", syscall.ENOSYS)
+	return nil, NewBackendError("dummy source", syscall.EIO)
 }
 
 func (m *DefaultFileSystem) Readlink(path string) (string, Error) {
-	return "", NewBackendError("not implemented", syscall.ENOSYS)
+	return "", NewBackendError("dummy source", syscall.EIO)
 }
 
 func (m *DefaultFileSystem) OpenFile(path string, flags int) (File, Error) {
-	return nil, NewBackendError("not implemented", syscall.ENOSYS)
+	return nil, NewBackendError("dummy source", syscall.EIO)
 }

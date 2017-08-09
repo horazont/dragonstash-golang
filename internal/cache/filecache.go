@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	mmap "github.com/edsrzf/mmap-go"
 	"github.com/horazont/dragonstash/internal/backend"
 )
 
@@ -21,9 +22,10 @@ const (
 	ROOT_INODE_NAME = "root.inode"
 	ROOT_STATE_NAME = "root.state"
 	DIR_SUFFIX      = ".dir"
-	FILE_SUFFIX     = ".data"
+	DATA_SUFFIX     = ".data"
 	LINK_SUFFIX     = ".link"
 	BLOCKMAP_SUFFIX = ".blocks"
+	BLOCK_SIZE      = 4096
 )
 
 type quotaMetadata struct {
@@ -178,6 +180,10 @@ func NewFileCache(root string) *FileCache {
 		metadata:    metadata,
 		staleInodes: make(map[*inode]bool),
 	}
+}
+
+func (m *FileCache) BlockSize() int64 {
+	return 4096
 }
 
 func (m *FileCache) inodeChildren(node *inode) (map[string]*inode, backend.Error) {
@@ -353,7 +359,7 @@ func (m *FileCache) openStorage(
 	write bool,
 ) (f *safeFile, err error) {
 	if write {
-		err = os.MkdirAll(filepath.Dir(storage_path), 0700)
+		err := m.createStorageDirs(storage_path)
 		if err != nil {
 			log.Printf("FileCache: could not create cache directories: %s", err)
 			return nil, err
@@ -368,6 +374,10 @@ func (m *FileCache) openStorage(
 	}
 
 	return f, nil
+}
+
+func (m *FileCache) createStorageDirs(storage_path string) error {
+	return os.MkdirAll(filepath.Dir(storage_path), 0700)
 }
 
 func (m *FileCache) PutDir(
@@ -666,7 +676,8 @@ func (m *FileCache) writeback() {
 	for node, _ := range m.staleInodes {
 		if node == m.root_node {
 			m.writeRootInode()
-		} else if node.Mode()&syscall.S_IFDIR != 0 {
+		}
+		if node.Mode()&syscall.S_IFDIR != 0 {
 			m.writeDirectory(node)
 		}
 		delete(m.staleInodes, node)
@@ -675,4 +686,200 @@ func (m *FileCache) writeback() {
 
 func (m *FileCache) markInodeStale(node *inode) {
 	m.staleInodes[node] = true
+}
+
+func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) {
+	storage_path_base := m.getStoragePath(path, "")
+	m.createStorageDirs(storage_path_base)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	_, err := m.getInode(path)
+	if err != nil {
+		return nil, err
+	}
+
+	data_storage_path := storage_path_base + DATA_SUFFIX
+	blockmap_storage_path := storage_path_base + BLOCKMAP_SUFFIX
+
+	dataf, oserr := os.OpenFile(
+		data_storage_path,
+		os.O_CREATE|os.O_RDWR,
+		0700,
+	)
+	if oserr != nil {
+		return nil, backend.NewBackendError(
+			oserr.Error(),
+			syscall.EIO,
+		)
+	}
+	blockmapf, oserr := os.OpenFile(
+		blockmap_storage_path,
+		os.O_CREATE|os.O_RDWR,
+		0700,
+	)
+	if oserr != nil {
+		dataf.Close()
+		return nil, backend.NewBackendError(
+			oserr.Error(),
+			syscall.EIO,
+		)
+	}
+
+	return &FileHandle{
+		lock:          new(sync.Mutex),
+		data_file:     dataf,
+		blockmap_file: blockmapf,
+		blockmap:      nil,
+		refcnt:        1,
+	}, nil
+}
+
+type FileHandle struct {
+	lock          *sync.Mutex
+	data_file     *os.File
+	blockmap_file *os.File
+	blockmap      mmap.MMap
+	refcnt        uint64
+}
+
+func (m *FileHandle) ensureBlockmapMapped() {
+	if m.blockmap != nil {
+		return
+	}
+
+	blockmap, err := mmap.Map(m.blockmap_file, mmap.RDWR, 0)
+	if err != nil {
+		panic("failed to mmap blockmap!")
+	}
+	m.blockmap = blockmap
+}
+
+func (m *FileHandle) ensureBlockmapSize(last int64) {
+	if m.blockmap != nil && int64(len(m.blockmap)) >= last {
+		// large enough
+		return
+	}
+
+	m.truncateAndRemap(last + 1)
+}
+
+func (m *FileHandle) truncateAndRemap(size int64) {
+	// ensure that changes are written to disk first
+	m.data_file.Sync()
+	m.blockmap.Flush()
+
+	m.blockmap.Unmap()
+	m.blockmap = nil
+	m.blockmap_file.Truncate(size)
+
+	m.ensureBlockmapMapped()
+
+	if int64(len(m.blockmap)) != size {
+		panic("failed to resize blockmap!")
+	}
+
+}
+
+func (m *FileHandle) truncateBlockmap(last int64) {
+	if m.blockmap != nil && int64(len(m.blockmap)) == last+1 {
+		// large enough
+		return
+	}
+
+	m.truncateAndRemap(last + 1)
+}
+
+func (m *FileHandle) PutReadData(data []byte, position int64, at_eof bool) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if position%BLOCK_SIZE != 0 || (len(data)%BLOCK_SIZE != 0 && !at_eof) {
+		panic("read is not aligned to block size")
+	}
+
+	nblocks := (len(data) + BLOCK_SIZE - 1) / BLOCK_SIZE
+	firstBlock := position / BLOCK_SIZE
+	lastBlock := firstBlock + int64(nblocks) - 1
+
+	m.ensureBlockmapSize(lastBlock)
+
+	_, err := m.data_file.WriteAt(data, position)
+	if err != nil {
+		log.Printf("failed to write to cache file: %s", err)
+		return
+	}
+
+	if at_eof {
+		m.data_file.Truncate(position + int64(len(data)))
+		m.truncateBlockmap(lastBlock)
+	}
+
+	m.data_file.Sync()
+
+	for i := firstBlock; i <= lastBlock; i += 1 {
+		m.blockmap[i] = 1
+	}
+
+	m.blockmap.Flush()
+}
+
+func truncateRead(position int64, length int64, lastReadableBlock int64) int64 {
+	lastByte := position + length - 1
+	lastReadableByte := (lastReadableBlock+1)*4096 - 1
+
+	toOmit := lastByte - lastReadableByte
+	return length - toOmit
+}
+
+func (m *FileHandle) ReadData(data []byte, position int64) (int, backend.Error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	firstBlock := position / BLOCK_SIZE
+	nblocks := (len(data) + BLOCK_SIZE - 1) / BLOCK_SIZE
+	lastBlock := firstBlock + int64(nblocks) - 1
+
+	readLength := len(data)
+
+	m.ensureBlockmapMapped()
+
+	lastReadableBlock := firstBlock
+	lastCheckableBlock := lastBlock
+	if int64(len(m.blockmap)) <= lastCheckableBlock {
+		lastCheckableBlock = int64(len(m.blockmap) - 1)
+	}
+	for ; lastReadableBlock <= lastCheckableBlock; lastReadableBlock += 1 {
+		if m.blockmap[lastReadableBlock] == 0 {
+			lastReadableBlock -= 1
+			break
+		}
+	}
+
+	truncated := false
+	if lastReadableBlock < lastCheckableBlock && lastReadableBlock < lastBlock {
+		// bad, we don’t have the requested data
+		// truncate read and return EIO
+		readLength = int(truncateRead(position, int64(len(data)),
+			lastReadableBlock))
+		truncated = true
+	}
+
+	n, err := m.data_file.ReadAt(data[:readLength], position)
+	if err != io.EOF && err != nil {
+		return n, backend.WrapError(err)
+	} else if truncated {
+		return n, backend.WrapError(syscall.EIO)
+	} else {
+		return n, nil
+	}
+}
+
+func (m *FileHandle) Close() {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	// FIXME: do other cleanup, such as fsyncing
+	m.refcnt -= 1
 }
