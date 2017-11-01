@@ -98,4 +98,16 @@ func TestTruncateRead(t *testing.T) {
 			701,
 		)
 	})
+
+	t.Run("truncate to before start", func(t *testing.T) {
+		assertEqualInt64(
+			t,
+			truncateRead(
+				4096,
+				4096,
+				0,
+			),
+			0,
+		)
+	})
 }

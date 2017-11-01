@@ -7,7 +7,7 @@ type Interface interface {
 	FetchAttr(path string) (backend.FileStat, backend.Error)
 	FetchDir(path string) ([]backend.DirEntry, backend.Error)
 	FetchLink(path string) (string, backend.Error)
-	OpenForStore(path string) (CachedFileHandle, backend.Error)
+	OpenForStore(path string, mtime uint64, size uint64) (CachedFileHandle, backend.Error)
 	PutAttr(path string, stat backend.FileStat)
 	PutDir(path string, fs backend.FileSystem, entries []backend.DirEntry)
 	PutLink(path string, dest string)

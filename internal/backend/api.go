@@ -11,6 +11,7 @@ type FileSystem interface {
 
 type File interface {
 	Read(dest []byte, position int64) (int, Error)
+	Release()
 }
 
 type DirEntry interface {

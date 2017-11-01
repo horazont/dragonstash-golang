@@ -81,7 +81,16 @@ func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Err
 		return f, err
 	}
 
-	cachef, err := m.cache.OpenForStore(path)
+	// stat, err := f.Stat()
+	// if err != nil {
+	// 	f.Release()
+	// 	if !IsUnavailableError(err) {
+	// 		return nil, err
+	// 	}
+	// 	f = nil
+	// }
+
+	cachef, err := m.cache.OpenForStore(path, 0, 0)
 	if err != nil {
 		log.Printf("failed to open cache store for %#v: %s",
 			path,
@@ -177,4 +186,18 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, backend.Error) 
 	copy(dest, buffer[start:end])
 
 	return n, err
+}
+
+func (m *CacheLayerFile) Release() {
+	log.Printf("releasing cache layer file")
+
+	if m.cacheside != nil {
+		m.cacheside.Close()
+		m.cacheside = nil
+	}
+
+	if m.fsside != nil {
+		m.fsside.Release()
+		m.fsside = nil
+	}
 }

@@ -186,6 +186,7 @@ func newLocalFile(f *os.File) *LocalFile {
 func (m *LocalFile) Read(dest []byte, position int64) (int, Error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+
 	n, err := m.backend.ReadAt(dest, position)
 	if err == io.EOF {
 		err = nil
@@ -195,4 +196,23 @@ func (m *LocalFile) Read(dest []byte, position int64) (int, Error) {
 		log.Printf("Read(): %s\n", err)
 	}
 	return n, WrapError(err)
+}
+
+func (m *LocalFile) Stat() (FileStat, Error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	stat, err := m.backend.Stat()
+	if err != nil {
+		return nil, WrapError(err)
+	}
+
+	return wrapFileInfo(stat), nil
+}
+
+func (m *LocalFile) Release() {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	m.backend.Close()
 }

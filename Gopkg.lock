@@ -8,6 +8,12 @@
   version = "v0.3.0"
 
 [[projects]]
+  name = "github.com/davecgh/go-spew"
+  packages = ["spew"]
+  revision = "346938d642f2ec3594ed81d874461961cd0faa76"
+  version = "v1.1.0"
+
+[[projects]]
   branch = "master"
   name = "github.com/edsrzf/mmap-go"
   packages = ["."]
@@ -19,9 +25,21 @@
   revision = "5690be47d614355a22931c129e1075c25a62e9ac"
   version = "v20170619"
 
+[[projects]]
+  name = "github.com/pmezard/go-difflib"
+  packages = ["difflib"]
+  revision = "792786c7400a136282c1664665ae0a8db921c6c2"
+  version = "v1.0.0"
+
+[[projects]]
+  name = "github.com/stretchr/testify"
+  packages = ["assert"]
+  revision = "69483b4bd14f5845b5a1e55bca19e954e827f1d0"
+  version = "v1.1.4"
+
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "f722b91d95f2769c1d78815c7e03910241f7ea2a852c59523dfb692016df88c7"
+  inputs-digest = "aa3b211a84292c2fe3fcc436aef391b1d8f3995e9f8afd90b1da92a8e48694da"
   solver-name = "gps-cdcl"
   solver-version = 1

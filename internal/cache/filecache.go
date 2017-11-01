@@ -28,30 +28,27 @@ const (
 	BLOCK_SIZE      = 4096
 )
 
+const (
+	block_prio_written   = iota
+	block_prio_read      = iota
+	block_prio_readahead = iota
+)
+
 type quotaMetadata struct {
 	BlocksUsed  uint64 `toml:"blocks_used"`
 	BlocksTotal uint64 `toml:"blocks_total"`
 }
 
-type fileMetadata struct {
-	Blocks     uint64 `toml:"blocks_used"`
-	UniquePath string `toml:"unique_path"`
-	SyncMtime  uint64 `toml:"sync_mtime"`
-	SyncSize   uint64 `toml:"sync_size"`
-	fileHandle *FileHandle
-}
-
 type metadata struct {
-	Quota quotaMetadata           `toml:"quota"`
-	Files map[string]fileMetadata `toml:"files"`
+	Quota quotaMetadata `toml:"quota"`
 }
 
 type inode struct {
 	name     string
-	stat     backend.FileStat
 	cache    dirCacheEntry
 	children map[string]*inode
 	parent   *inode
+	file     *FileHandle
 }
 
 func (m *inode) Name() string {
@@ -59,11 +56,11 @@ func (m *inode) Name() string {
 }
 
 func (m *inode) Stat() backend.FileStat {
-	return m.stat
+	return &m.cache
 }
 
 func (m *inode) Mode() uint32 {
-	return m.stat.Mode()
+	return m.cache.Mode()
 }
 
 func inodeFromCacheEntry(entry *dirCacheEntry) *inode {
@@ -72,7 +69,6 @@ func inodeFromCacheEntry(entry *dirCacheEntry) *inode {
 		cache:    *entry,
 		children: nil,
 	}
-	node.stat = &node.cache
 	return node
 }
 
@@ -154,6 +150,7 @@ type FileCache struct {
 	metadata      metadata
 	metadataStale bool
 	staleInodes   map[*inode]bool
+	fileHandles   map[string]*FileHandle
 }
 
 func NewFileCache(root string) *FileCache {
@@ -162,7 +159,9 @@ func NewFileCache(root string) *FileCache {
 
 	if root_node == nil {
 		root_node = &inode{
-			stat: newDummyStat(),
+			cache: dirCacheEntry{
+				ModeV: syscall.S_IFDIR,
+			},
 		}
 	}
 
@@ -182,6 +181,10 @@ func NewFileCache(root string) *FileCache {
 	}
 }
 
+func (m *FileCache) SetBlocksTotal(newTotal uint64) {
+	m.metadata.Quota.BlocksTotal = newTotal
+}
+
 func (m *FileCache) BlockSize() int64 {
 	return 4096
 }
@@ -190,7 +193,7 @@ func (m *FileCache) inodeChildren(node *inode) (map[string]*inode, backend.Error
 	if node.children != nil {
 		return node.children, nil
 	}
-	if node.stat.Mode()&syscall.S_IFDIR == 0 {
+	if node.cache.Mode()&syscall.S_IFDIR == 0 {
 		// is not a directory
 		return nil, backend.WrapError(syscall.Errno(syscall.ENOTDIR))
 	}
@@ -315,13 +318,14 @@ func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
 			delete(unseenmap, name)
 			child, ok := node.children[name]
 			if ok {
-				child.stat = entry.Stat()
+				updateStatToCache(entry.Stat(), &child.cache)
 			} else {
-				node.children[name] = &inode{
+				new_inode := &inode{
 					name:   name,
-					stat:   entry.Stat(),
 					parent: node,
 				}
+				fullDirEntryToCache(name, entry.Stat(), &new_inode.cache)
+				node.children[name] = new_inode
 			}
 		}
 
@@ -335,11 +339,12 @@ func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
 		// simply fill
 		node.children = make(map[string]*inode)
 		for _, entry := range entries {
-			node.children[entry.Name()] = &inode{
+			new_inode := &inode{
 				name:   entry.Name(),
-				stat:   entry.Stat(),
 				parent: node,
 			}
+			fullDirEntryToCache(entry.Name(), entry.Stat(), &new_inode.cache)
+			node.children[entry.Name()] = new_inode
 		}
 	}
 	m.markInodeStale(node)
@@ -449,7 +454,8 @@ func (m *FileCache) writeDirectory(node *inode) {
 	cache.Entries = make([]dirCacheEntry, len(node.children))
 	var i = 0
 	for name, entry := range node.children {
-		fullDirEntryToCache(name, entry.Stat(), &cache.Entries[i])
+		cache.Entries[i].NameV = name
+		cache.Entries[i] = entry.cache
 		i += 1
 	}
 
@@ -573,7 +579,7 @@ func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
 		log.Printf("PutAttr: getInode failed for %#v: %s", path, err)
 		return
 	}
-	inode.stat = stat
+	updateStatToCache(stat, &inode.cache)
 
 	if path == "" {
 		// root inode
@@ -688,16 +694,24 @@ func (m *FileCache) markInodeStale(node *inode) {
 	m.staleInodes[node] = true
 }
 
-func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) {
+func (m *FileCache) OpenForStore(
+	path string,
+	mtime uint64,
+	size uint64,
+) (CachedFileHandle, backend.Error) {
 	storage_path_base := m.getStoragePath(path, "")
 	m.createStorageDirs(storage_path_base)
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	_, err := m.getInode(path)
+	node, err := m.getInode(path)
 	if err != nil {
 		return nil, err
+	}
+
+	if node.file != nil {
+		return node.file, nil
 	}
 
 	data_storage_path := storage_path_base + DATA_SUFFIX
@@ -706,7 +720,7 @@ func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) 
 	dataf, oserr := os.OpenFile(
 		data_storage_path,
 		os.O_CREATE|os.O_RDWR,
-		0700,
+		0600,
 	)
 	if oserr != nil {
 		return nil, backend.NewBackendError(
@@ -717,7 +731,7 @@ func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) 
 	blockmapf, oserr := os.OpenFile(
 		blockmap_storage_path,
 		os.O_CREATE|os.O_RDWR,
-		0700,
+		0600,
 	)
 	if oserr != nil {
 		dataf.Close()
@@ -728,6 +742,8 @@ func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) 
 	}
 
 	return &FileHandle{
+		path:          path,
+		cache:         m,
 		lock:          new(sync.Mutex),
 		data_file:     dataf,
 		blockmap_file: blockmapf,
@@ -736,7 +752,49 @@ func (m *FileCache) OpenForStore(path string) (CachedFileHandle, backend.Error) 
 	}, nil
 }
 
+func (m *FileCache) closeHandle(handle *FileHandle) {
+	if m.fileHandles[handle.path] != handle {
+		panic("inconsistent internal state: handle isn’t at expected path")
+	}
+
+	delete(m.fileHandles, handle.path)
+}
+
+func (m *FileCache) requestBlocks(path string, nblocks uint64, priority int) bool {
+	// request a number of blocks, return true if request passes by quota
+	// priority is ignored for now, but in the future, it should behave like this:
+	//
+	//     readahead -> no blocks are ever evicted for this
+	//     read, written -> apply usual eviction
+	//
+	// (written may get different semantics based on eviction pattern)
+	log.Printf("requestBlocks: request for %d blocks", nblocks)
+	if nblocks == 0 {
+		return true
+	}
+
+	free_blocks := m.metadata.Quota.BlocksTotal - m.metadata.Quota.BlocksUsed
+	if free_blocks < nblocks {
+		return false
+	}
+
+	inode, err := m.getInode(path)
+	if err != nil {
+		return false
+	}
+
+	inode.cache.BlocksV += nblocks
+	m.markInodeStale(inode.parent)
+	m.metadata.Quota.BlocksUsed += nblocks
+	m.metadataStale = true
+	m.writeback()
+
+	return true
+}
+
 type FileHandle struct {
+	path          string
+	cache         *FileCache
 	lock          *sync.Mutex
 	data_file     *os.File
 	blockmap_file *os.File
@@ -803,6 +861,25 @@ func (m *FileHandle) PutReadData(data []byte, position int64, at_eof bool) {
 	firstBlock := position / BLOCK_SIZE
 	lastBlock := firstBlock + int64(nblocks) - 1
 
+	var newBlocks int64 = 0
+
+	lastBlockmapBlock := int64(len(m.blockmap) - 1)
+	lastIterBlock := lastBlock
+	if lastIterBlock > lastBlockmapBlock {
+		newBlocks += lastIterBlock - lastBlockmapBlock
+		lastIterBlock = lastBlockmapBlock
+	}
+	for i := firstBlock; i <= lastIterBlock; i += 1 {
+		if m.blockmap[i] == 0 {
+			newBlocks += 1
+		}
+	}
+
+	if newBlocks > 0 && !m.cache.requestBlocks(m.path, uint64(newBlocks), block_prio_read) {
+		log.Printf("blocks rejected by quota management, not writing")
+		return
+	}
+
 	m.ensureBlockmapSize(lastBlock)
 
 	_, err := m.data_file.WriteAt(data, position)
@@ -845,26 +922,42 @@ func (m *FileHandle) ReadData(data []byte, position int64) (int, backend.Error) 
 
 	m.ensureBlockmapMapped()
 
+	log.Printf("ReadData: firstBlock=%d, nblocks=%d lastBlock=%d readLength=%d",
+		firstBlock,
+		nblocks,
+		lastBlock,
+		readLength)
+
 	lastReadableBlock := firstBlock
 	lastCheckableBlock := lastBlock
 	if int64(len(m.blockmap)) <= lastCheckableBlock {
 		lastCheckableBlock = int64(len(m.blockmap) - 1)
 	}
-	for ; lastReadableBlock <= lastCheckableBlock; lastReadableBlock += 1 {
-		if m.blockmap[lastReadableBlock] == 0 {
-			lastReadableBlock -= 1
-			break
+	if lastReadableBlock > lastCheckableBlock {
+		// read is definitely out of bounds, no need to check blockmap
+		lastReadableBlock = firstBlock - 1
+	} else {
+		for ; lastReadableBlock <= lastCheckableBlock; lastReadableBlock += 1 {
+			if m.blockmap[lastReadableBlock] == 0 {
+				lastReadableBlock -= 1
+				break
+			}
 		}
 	}
 
 	truncated := false
-	if lastReadableBlock < lastCheckableBlock && lastReadableBlock < lastBlock {
+	if lastReadableBlock < lastBlock {
 		// bad, we don’t have the requested data
 		// truncate read and return EIO
 		readLength = int(truncateRead(position, int64(len(data)),
 			lastReadableBlock))
 		truncated = true
 	}
+
+	log.Printf("ReadData: lastReadableBlock=%d lastCheckableBlock=%d truncated=%s",
+		lastReadableBlock,
+		lastCheckableBlock,
+		truncated)
 
 	n, err := m.data_file.ReadAt(data[:readLength], position)
 	if err != io.EOF && err != nil {
@@ -880,6 +973,13 @@ func (m *FileHandle) Close() {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	// FIXME: do other cleanup, such as fsyncing
+	log.Printf("decreasing refcount on file handle %#v", m)
+
 	m.refcnt -= 1
+	if m.refcnt == 0 {
+		m.cache.closeHandle(m)
+	}
+}
+
+func (m *FileHandle) purge() {
 }

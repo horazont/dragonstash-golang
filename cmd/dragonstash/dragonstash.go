@@ -75,6 +75,7 @@ func main() {
 	mountpoint := flag.Arg(2)
 
 	filecache := cache.NewFileCache(cachedir)
+	filecache.SetBlocksTotal(16)
 
 	// back_fs := backend.NewLocalFileSystem(flag.Arg(0))
 	back_fs := backend.NewDefaultFileSystem()

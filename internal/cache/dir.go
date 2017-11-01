@@ -3,14 +3,17 @@ package cache
 import "github.com/horazont/dragonstash/internal/backend"
 
 type dirCacheEntry struct {
-	NameV  string `toml:"name"`
-	ModeV  uint32 `toml:"mode"`
-	MtimeV uint64 `toml:"mtime"`
-	CtimeV uint64 `toml:"ctime"`
-	AtimeV uint64 `toml:"atime"`
-	SizeV  uint64 `toml:"size"`
-	UidV   uint32 `toml:"uid"`
-	GidV   uint32 `toml:"gid"`
+	NameV      string `toml:"name"`
+	ModeV      uint32 `toml:"mode"`
+	MtimeV     uint64 `toml:"mtime"`
+	CtimeV     uint64 `toml:"ctime"`
+	AtimeV     uint64 `toml:"atime"`
+	SizeV      uint64 `toml:"size"`
+	UidV       uint32 `toml:"uid"`
+	GidV       uint32 `toml:"gid"`
+	BlocksV    uint64 `toml:"blocks"`
+	SyncMTimeV uint64 `toml:"sync_mtime"`
+	SyncSizeV  uint64 `toml:"sync_size"`
 }
 
 type dirCache struct {
@@ -19,6 +22,13 @@ type dirCache struct {
 
 func fullDirEntryToCache(name string, stat backend.FileStat, dest *dirCacheEntry) {
 	dest.NameV = name
+	updateStatToCache(stat, dest)
+	dest.BlocksV = 0
+	dest.SyncMTimeV = 0
+	dest.SyncSizeV = 0
+}
+
+func updateStatToCache(stat backend.FileStat, dest *dirCacheEntry) {
 	dest.ModeV = stat.Mode()
 	dest.MtimeV = stat.Mtime()
 	dest.AtimeV = stat.Atime()
@@ -71,7 +81,7 @@ func (m *dirCacheEntry) Atime() uint64 {
 }
 
 func (m *dirCacheEntry) Blocks() uint64 {
-	return 0
+	return m.BlocksV
 }
 
 func (m *dirCacheEntry) Ctime() uint64 {
