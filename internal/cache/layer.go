@@ -8,11 +8,11 @@ import (
 )
 
 type CacheLayer struct {
-	cache Interface
+	cache Cache
 	fs    backend.FileSystem
 }
 
-func NewCacheLayer(cache Interface, fs backend.FileSystem) *CacheLayer {
+func NewCacheLayer(cache Cache, fs backend.FileSystem) *CacheLayer {
 	return &CacheLayer{
 		cache: cache,
 		fs:    fs,
@@ -28,6 +28,7 @@ func (m *CacheLayer) Join(elems ...string) string {
 }
 
 func (m *CacheLayer) Lstat(path string) (backend.FileStat, backend.Error) {
+	log.Printf("Lstat(%s)", path)
 	if !m.fs.IsReady() {
 		return m.cache.FetchAttr(path)
 	}
@@ -37,7 +38,7 @@ func (m *CacheLayer) Lstat(path string) (backend.FileStat, backend.Error) {
 	} else {
 		// FIXME: check for connectivity errors and fall back to cache
 		// instead of deleting it
-		m.cache.Delete(path)
+		m.cache.PutNonExistant(path)
 	}
 	return stat, err
 }
@@ -50,11 +51,11 @@ func (m *CacheLayer) OpenDir(path string) ([]backend.DirEntry, backend.Error) {
 		// we don’t cache errors, for now
 		// FIXME: check for connectivity errors
 		if err != nil {
-			m.cache.Delete(path)
+			m.cache.PutNonExistant(path)
 			return entries, err
 		}
 
-		m.cache.PutDir(path, m.fs, entries)
+		m.cache.PutDir(path, entries)
 		return entries, err
 	}
 }
@@ -69,7 +70,7 @@ func (m *CacheLayer) Readlink(path string) (string, backend.Error) {
 		} else {
 			// FIXME: check for connectivity errors and fall back to
 			// cache
-			m.cache.Delete(path)
+			m.cache.PutNonExistant(path)
 		}
 		return dest, err
 	}
@@ -90,7 +91,7 @@ func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Err
 	// 	f = nil
 	// }
 
-	cachef, err := m.cache.OpenForStore(path, 0, 0)
+	cachef, err := m.cache.OpenFile(path)
 	if err != nil {
 		log.Printf("failed to open cache store for %#v: %s",
 			path,
@@ -107,11 +108,11 @@ func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Err
 
 type CacheLayerFile struct {
 	blocksize int64
-	cacheside CachedFileHandle
+	cacheside CachedFile
 	fsside    backend.File
 }
 
-func wrapFile(cacheside CachedFileHandle, fsside backend.File, blocksize int64) backend.File {
+func wrapFile(cacheside CachedFile, fsside backend.File, blocksize int64) backend.File {
 	return &CacheLayerFile{
 		blocksize: blocksize,
 		cacheside: cacheside,
@@ -144,7 +145,7 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, backend.Error) 
 	}
 
 	if m.fsside == nil {
-		return m.cacheside.ReadData(dest, position)
+		return m.cacheside.FetchData(dest, position)
 	}
 
 	new_position, new_length, offset := alignRead(
@@ -163,14 +164,14 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, backend.Error) 
 	if err != nil {
 		if IsUnavailableError(err) {
 			// read data from cache instead
-			return m.cacheside.ReadData(dest, position)
+			return m.cacheside.FetchData(dest, position)
 		} else {
 			// read error, do not cache the data
 			// TODO: un-cache any cached data in that range
 			return n, err
 		}
 	}
-	m.cacheside.PutReadData(buffer[:n], new_position, int64(n) < new_length)
+	m.cacheside.PutData(buffer[:n], new_position, int64(n) < new_length, false)
 
 	start := offset
 	end := offset + int64(len(dest))

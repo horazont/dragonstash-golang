@@ -3,351 +3,249 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"fmt"
+	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
-	mmap "github.com/edsrzf/mmap-go"
 	"github.com/horazont/dragonstash/internal/backend"
 )
 
 const (
-	ROOT_INODE_NAME = "root.inode"
-	ROOT_STATE_NAME = "root.state"
-	DIR_SUFFIX      = ".dir"
-	DATA_SUFFIX     = ".data"
-	LINK_SUFFIX     = ".link"
-	BLOCKMAP_SUFFIX = ".blocks"
-	BLOCK_SIZE      = 4096
+	BLOCK_SIZE = 4096
+	fmt_REG    = 1
+	fmt_DIR    = 2
+	fmt_LNK    = 3
 )
 
-const (
-	block_prio_written   = iota
-	block_prio_read      = iota
-	block_prio_readahead = iota
+var (
+	ErrUnsupportedInode = errors.New("unsupported inode type")
 )
 
-type quotaMetadata struct {
-	BlocksUsed  uint64 `toml:"blocks_used"`
-	BlocksTotal uint64 `toml:"blocks_total"`
-}
-
-type metadata struct {
-	Quota quotaMetadata `toml:"quota"`
-}
-
-type inode struct {
-	name     string
-	cache    dirCacheEntry
-	children map[string]*inode
-	parent   *inode
-	file     *FileHandle
-}
-
-func (m *inode) Name() string {
-	return m.name
-}
-
-func (m *inode) Stat() backend.FileStat {
-	return &m.cache
-}
-
-func (m *inode) Mode() uint32 {
-	return m.cache.Mode()
-}
-
-func inodeFromCacheEntry(entry *dirCacheEntry) *inode {
-	node := &inode{
-		name:     entry.Name(),
-		cache:    *entry,
-		children: nil,
+func normalizePath(path string) string {
+	if path == "/" {
+		return ""
 	}
-	return node
+	if len(path) > 0 && path[0] != '/' {
+		path = "/" + path
+	}
+	return path
 }
 
-func loadDirFromReader(r io.Reader) (map[string]*inode, error) {
-	cache := dirCache{}
-	_, err := toml.DecodeReader(r, &cache)
+type inode interface {
+	mutex() *sync.Mutex
+	attr() *dirCacheEntry
+	writeWithHeader(dest io.Writer) error
+}
+
+type regularInodeData struct {
+	Attrib dirCacheEntry `toml:"attrib"`
+}
+
+type linkInodeData struct {
+	Attrib   dirCacheEntry `toml:"attrib"`
+	LinkDest string        `toml:"link_dest"`
+}
+
+type dirInodeData struct {
+	Attrib   dirCacheEntry `toml:"attrib"`
+	Children []string      `toml:"children"`
+}
+
+func readRegularInode(src io.Reader) (inode inode, err error) {
+	data := regularInodeData{}
+	_, err = toml.DecodeReader(src, &data)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]*inode)
-	for _, entry := range cache.Entries {
-		result[entry.Name()] = inodeFromCacheEntry(&entry)
+	inode = &fileInode{
+		inodeImpl: inodeImpl{
+			_attr: data.Attrib,
+		},
 	}
 
-	return result, nil
+	return inode, nil
 }
 
-func loadDirFromFile(path string) (map[string]*inode, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return loadDirFromReader(f)
-}
-
-func loadInodeFromReader(r io.Reader) (*inode, error) {
-	entry := dirCacheEntry{}
-	_, err := toml.DecodeReader(r, &entry)
+func readDirectoryInode(src io.Reader) (inode inode, err error) {
+	data := dirInodeData{}
+	_, err = toml.DecodeReader(src, &data)
 	if err != nil {
 		return nil, err
 	}
 
-	return inodeFromCacheEntry(&entry), nil
+	inode = &dirInode{
+		inodeImpl: inodeImpl{
+			_attr: data.Attrib,
+		},
+		children: data.Children,
+	}
+
+	return inode, nil
 }
 
-func loadInodeFromFile(path string) (*inode, error) {
-	f, err := os.Open(path)
+func readLinkInode(src io.Reader) (inode inode, err error) {
+	data := linkInodeData{}
+	_, err = toml.DecodeReader(src, &data)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return loadInodeFromReader(f)
-}
 
-func (m *inode) path() string {
-	parts := []string{m.name}
-	for parent := m.parent; parent != nil; parent = parent.parent {
-		parts = append(parts, parent.name)
+	inode = &linkInode{
+		inodeImpl: inodeImpl{
+			_attr: data.Attrib,
+		},
+		dest: data.LinkDest,
 	}
 
-	// I don’t like to have to write an explicit reversal here, but this
-	// seems to be how things are done in golang
-	for i := len(parts)/2 - 1; i >= 0; i-- {
-		opp := len(parts) - 1 - i
-		parts[i], parts[opp] = parts[opp], parts[i]
+	return inode, nil
+}
+
+func ReadInodeWithHeader(src io.Reader) (inode, error) {
+	var format_header uint32
+	err := binary.Read(src, binary.LittleEndian, &format_header)
+	if err != nil {
+		return nil, err
 	}
 
-	return path.Join(parts...)
+	switch format_header {
+	case fmt_REG:
+		return readRegularInode(src)
+	case fmt_DIR:
+		return readDirectoryInode(src)
+	case fmt_LNK:
+		return readLinkInode(src)
+	}
+
+	return nil, ErrUnsupportedInode
 }
 
-type dummyStat struct {
-	backend.DefaultFileStat
+type inodeImpl struct {
+	_mutex sync.Mutex
+	_attr  dirCacheEntry
 }
 
-func newDummyStat() *dummyStat {
-	return &dummyStat{*backend.NewDefaultFileStat()}
+func (m *inodeImpl) mutex() *sync.Mutex {
+	return &m._mutex
 }
 
-func (m *dummyStat) Mode() uint32 {
-	return syscall.S_IFDIR
+func (m *inodeImpl) attr() *dirCacheEntry {
+	return &m._attr
+}
+
+type fileInode struct {
+	inodeImpl
+	handle *fileCacheFile
+}
+
+func writeTomlWithHeader(dest io.Writer, format uint32, v interface{}) error {
+	err := binary.Write(dest, binary.LittleEndian, &format)
+	if err != nil {
+		return err
+	}
+	encoder := toml.NewEncoder(dest)
+	return encoder.Encode(v)
+}
+
+func (m *fileInode) writeWithHeader(dest io.Writer) error {
+	return writeTomlWithHeader(dest, fmt_REG, &regularInodeData{
+		Attrib: m._attr,
+	})
+}
+
+type dirInode struct {
+	inodeImpl
+	children []string
+}
+
+func (m *dirInode) writeWithHeader(dest io.Writer) error {
+	return writeTomlWithHeader(dest, fmt_DIR, &dirInodeData{
+		Attrib:   m._attr,
+		Children: m.children,
+	})
+}
+
+type linkInode struct {
+	inodeImpl
+	dest string
+}
+
+func (m *linkInode) writeWithHeader(dest io.Writer) error {
+	return writeTomlWithHeader(dest, fmt_LNK, &linkInodeData{
+		Attrib:   m._attr,
+		LinkDest: m.dest,
+	})
 }
 
 type FileCache struct {
-	lock          *sync.Mutex
-	root_dir      string
-	root_node     *inode
-	metadata      metadata
-	metadataStale bool
-	staleInodes   map[*inode]bool
-	fileHandles   map[string]*FileHandle
+	lock        *sync.Mutex
+	root_dir    string
+	inodes      map[string]inode
+	quota       quotaInfo
+	dirtyInodes map[inode]bool
 }
 
-func NewFileCache(root string) *FileCache {
-	root_path := filepath.Join(root, ROOT_INODE_NAME)
-	root_node, _ := loadInodeFromFile(root_path)
+type fileCacheFile struct {
+	// The inode of the file (also contains the lock)
+	inode *inode
+	// How many open descriptors there are. If this drops to zero, the file
+	// may be evicted from the in-memory cache
+	refcnt uint64
+}
 
-	if root_node == nil {
-		root_node = &inode{
-			cache: dirCacheEntry{
-				ModeV: syscall.S_IFDIR,
-			},
-		}
-	}
-
-	metadata := metadata{}
-	f, err := os.Open(filepath.Join(root, ROOT_STATE_NAME))
-	if err == nil {
-		defer f.Close()
-		toml.DecodeReader(f, &metadata)
-	}
-
+func NewFileCache(root_dir string) *FileCache {
 	return &FileCache{
 		lock:        new(sync.Mutex),
-		root_dir:    root,
-		root_node:   root_node,
-		metadata:    metadata,
-		staleInodes: make(map[*inode]bool),
+		root_dir:    root_dir,
+		inodes:      make(map[string]inode),
+		dirtyInodes: make(map[inode]bool),
 	}
 }
 
-func (m *FileCache) SetBlocksTotal(newTotal uint64) {
-	m.metadata.Quota.BlocksTotal = newTotal
+func (m *FileCache) markInodeDirty(node inode) {
+	m.dirtyInodes[node] = true
 }
 
-func (m *FileCache) BlockSize() int64 {
-	return 4096
-}
-
-func (m *FileCache) inodeChildren(node *inode) (map[string]*inode, backend.Error) {
-	if node.children != nil {
-		return node.children, nil
-	}
-	if node.cache.Mode()&syscall.S_IFDIR == 0 {
-		// is not a directory
-		return nil, backend.WrapError(syscall.Errno(syscall.ENOTDIR))
-	}
-	path := m.getStoragePath(node.path(), DIR_SUFFIX)
-	var err error
-	node.children, err = loadDirFromFile(path)
-	for _, child := range node.children {
-		child.parent = node
-	}
+func (m *FileCache) writebackInode(node inode) {
+	path := m.getStoragePath(node.attr().NameV, ".inode")
+	os.MkdirAll(filepath.Dir(path), 0700)
+	log.Printf("writing inode for path %s to %s", node.attr().NameV, path)
+	file, err := CreateSafe(path)
 	if err != nil {
-		// need to convert into I/O error: we can’t read the cache
-		return nil, backend.NewBackendError(
-			err.Error(),
-			syscall.EIO,
-		)
+		log.Printf("failed to open for inode writing: %s", err)
+		return
 	}
-	return node.children, backend.WrapError(err)
+	defer file.Abort()
+
+	err = node.writeWithHeader(file)
+	if err != nil {
+		log.Printf("failed to write inode: %s", err)
+		return
+	}
+
+	err = file.Close()
+	if err != nil {
+		log.Printf("failed to finish writing inode: %s", err)
+	}
+
+	delete(m.dirtyInodes, node)
 }
 
-func (m *FileCache) getInode(path string) (*inode, backend.Error) {
-	log.Printf("getInode: %#v", path)
-	if path == "/" || path == "" {
-		return m.root_node, nil
+func (m *FileCache) writeback() {
+	for inode := range m.dirtyInodes {
+		func() {
+			inode.mutex().Lock()
+			defer inode.mutex().Unlock()
+			m.writebackInode(inode)
+		}()
 	}
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
-	path = filepath.Clean(path)
-	log.Printf("getInode: -> %#v", path)
-	parts := strings.Split(path, string(filepath.Separator))
-	log.Printf("getInode: -> %#v", parts)
-	node := m.root_node
-	for _, part := range parts {
-		children, err := m.inodeChildren(node)
-		if err != nil {
-			log.Printf("getInode: %#v: searching for %#v: cannot load"+
-				" children: %s", path, part, err)
-			return nil, err
-		}
-		log.Printf("getInode: %#v: searching for %#v: found %d children", path, part, len(children))
-		child, ok := children[part]
-		if !ok {
-			log.Printf("getInode: %#v: searching for %#v: ENOENT", path, part)
-			return nil, backend.WrapError(
-				syscall.Errno(syscall.ENOENT),
-			)
-		}
-		node = child
-	}
-	return node, nil
-}
-
-func (m *FileCache) getInodeAutofill(
-	path string,
-	fs backend.FileSystem,
-) (*inode, backend.Error) {
-	// idea: move upwards through the tree and create inodes as needed
-	if path == "/" || path == "" {
-		return m.root_node, nil
-	}
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
-	path = filepath.Clean(path)
-	log.Printf("getInodeAutofill: -> %#v", path)
-	parts := strings.Split(path, string(filepath.Separator))
-
-	node := m.root_node
-	path_so_far := ""
-	for _, part := range parts {
-		children, err := m.inodeChildren(node)
-		if err != nil {
-			log.Printf("getInode: %#v: asking fs for %#v", path, part)
-			// try to fill from fs
-			entries, err := fs.OpenDir(path_so_far)
-			if err != nil {
-				log.Printf(
-					"getInodeAutofill: %#v: fs could not provide %#v: %s",
-					path,
-					part,
-					err,
-				)
-				return nil, err
-			}
-			m.fillInode(node, entries)
-			children = node.children
-		}
-
-		child, ok := children[part]
-		if !ok {
-			log.Printf("getInodeAutofill: %#v: searching for %#v: ENOENT", path, part)
-			return nil, backend.WrapError(
-				syscall.Errno(syscall.ENOENT),
-			)
-		}
-
-		path_so_far = fs.Join(path_so_far, part)
-		node = child
-	}
-
-	return node, nil
-}
-
-func (m *FileCache) fillInode(node *inode, entries []backend.DirEntry) {
-	if node.Stat().Mode()&syscall.S_IFDIR == 0 {
-		panic("attempt to add children to a non-directory inode")
-	}
-
-	if node.children != nil {
-		// we need to merge
-		unseenmap := make(map[string]*inode)
-		for k, child := range node.children {
-			unseenmap[k] = child
-		}
-
-		log.Printf("FileCache: synchronizing %d items into dir with %d items",
-			len(entries),
-			node.children)
-
-		for _, entry := range entries {
-			name := entry.Name()
-			delete(unseenmap, name)
-			child, ok := node.children[name]
-			if ok {
-				updateStatToCache(entry.Stat(), &child.cache)
-			} else {
-				new_inode := &inode{
-					name:   name,
-					parent: node,
-				}
-				fullDirEntryToCache(name, entry.Stat(), &new_inode.cache)
-				node.children[name] = new_inode
-			}
-		}
-
-		log.Printf("FileCache: removing %d stale items from dir", len(unseenmap))
-
-		for k, child := range unseenmap {
-			m.deleteRecursively(child, child.path())
-			delete(node.children, k)
-		}
-	} else {
-		// simply fill
-		node.children = make(map[string]*inode)
-		for _, entry := range entries {
-			new_inode := &inode{
-				name:   entry.Name(),
-				parent: node,
-			}
-			fullDirEntryToCache(entry.Name(), entry.Stat(), &new_inode.cache)
-			node.children[entry.Name()] = new_inode
-		}
-	}
-	m.markInodeStale(node)
 }
 
 func (m *FileCache) getStoragePath(path string, suffix string) string {
@@ -359,180 +257,194 @@ func (m *FileCache) getStoragePath(path string, suffix string) string {
 	return strings.TrimRight(filepath.Join(m.root_dir, p1, p2, p3), "=") + suffix
 }
 
-func (m *FileCache) openStorage(
-	storage_path string,
-	write bool,
-) (f *safeFile, err error) {
-	if write {
-		err := m.createStorageDirs(storage_path)
-		if err != nil {
-			log.Printf("FileCache: could not create cache directories: %s", err)
-			return nil, err
-		}
-		f, err = CreateSafe(storage_path)
-	} else {
-		f, err = OpenSafe(storage_path)
+// Obtain the inode for a path
+func (m *FileCache) getInode(path string) (inode, backend.Error) {
+	// first try to load the inode from the map
+	inode, ok := m.inodes[path]
+	if ok {
+		return inode, nil
 	}
 
+	// if that doesn’t work, try to load the inode from the fs
+	backend_path := m.getStoragePath(path, ".inode")
+	log.Printf("trying to load inode for path %s from %s", path, backend_path)
+	file, err := os.Open(backend_path)
+	if err != nil {
+		log.Printf("failed to open inode: %s", err)
+		return nil, backend.WrapError(syscall.EIO)
+	}
+
+	inode, err = ReadInodeWithHeader(file)
+	if err != nil {
+		log.Printf("failed to decode inode: %s", err)
+		return nil, backend.WrapError(syscall.EIO)
+	}
+
+	inode.attr().NameV = path
+
+	m.inodes[path] = inode
+	m.markInodeDirty(inode)
+
+	return inode, nil
+}
+
+func (m *FileCache) requireInode(path string, format uint32) inode {
+	inode, ok := m.inodes[path]
+	if ok && inode.attr().Mode()&syscall.S_IFMT == format {
+		// return existing inode if mode matches
+		return inode
+	} else {
+		// TODO: clean up old inode properly
+	}
+
+	switch format {
+	case syscall.S_IFDIR:
+		inode = &dirInode{}
+	case syscall.S_IFREG:
+		inode = &fileInode{}
+	case syscall.S_IFLNK:
+		inode = &linkInode{}
+	default:
+		panic("attempt to create an unsupported inode type")
+	}
+	inode.attr().NameV = path
+	// force the mode to be correct
+	inode.attr().ModeV = (inode.attr().ModeV &^ syscall.S_IFMT) | format
+
+	m.inodes[path] = inode
+	m.markInodeDirty(inode)
+	return inode
+}
+
+func (m *FileCache) deleteInode(path string) {
+	if inode, ok := m.inodes[path]; ok {
+		delete(m.inodes, path)
+		delete(m.dirtyInodes, inode)
+	}
+
+	backend_path := m.getStoragePath(path, ".inode")
+	os.Remove(backend_path)
+}
+
+func (m *FileCache) OpenFile(path string) (CachedFile, backend.Error) {
+	path = normalizePath(path)
+
+	return nil, backend.WrapError(syscall.EIO)
+}
+
+func (m *FileCache) putAttr(path string, stat backend.FileStat) {
+	inode := m.requireInode(path, stat.Mode()&syscall.S_IFMT)
+	updateStatToCache(stat, inode.attr())
+	m.markInodeDirty(inode)
+}
+
+func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
+	path = normalizePath(path)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	log.Printf("PutAttr(%s, %s)", path, stat)
+	m.putAttr(path, stat)
+	m.writeback()
+}
+
+func (m *FileCache) PutNonExistant(path string) {
+	path = normalizePath(path)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	m.deleteInode(path)
+}
+
+func (m *FileCache) fetchAttr(path string) (backend.FileStat, backend.Error) {
+	inode, err := m.getInode(path)
+	log.Printf("FetchAttr(%s): getInode -> %s, %s", path, inode, err)
 	if err != nil {
 		return nil, err
 	}
 
-	return f, nil
+	return inode.attr(), nil
 }
 
-func (m *FileCache) createStorageDirs(storage_path string) error {
-	return os.MkdirAll(filepath.Dir(storage_path), 0700)
+func (m *FileCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
+	path = normalizePath(path)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return m.fetchAttr(path)
 }
 
-func (m *FileCache) PutDir(
-	path string,
-	fs backend.FileSystem,
-	entries []backend.DirEntry,
-) {
+func (m *FileCache) PutLink(path string, dest string) {
+	path = normalizePath(path)
+
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	parent_inode, err := m.getInodeAutofill(path, fs)
-	if err != nil {
-		// parent not in cache yet? -> discard
-		// FIXME: in the future we’d want to create a cache entry
-		// nevertheless, including for parent directories
-		return
-	}
-
-	// try to load the children from disk
-	_, _ = m.inodeChildren(parent_inode)
-	m.fillInode(parent_inode, entries)
-
-	log.Printf("PutDir: writing inode %s %v",
-		parent_inode.name,
-		parent_inode)
-
-	// log.Printf("FileCache: request to store %d entries for %s", len(entries), path)
-	// cachepath := m.getStoragePath(path)
-	// log.Printf("FileCache: storage for %s is at %s", path, cachepath)
-	// cache := dirCache{}
-	// cache.Entries = dirEntriesToCache(path, fs, entries)
-	// err := os.MkdirAll(filepath.Dir(cachepath), 0700)
-	// if err != nil {
-	// 	log.Printf("FileCache: could not create cache directories: %s", err)
-	// 	return
-	// }
-	// dest, err := os.Create(cachepath)
-	// if err != nil {
-	// 	log.Printf("FileCache: could not create cache file: %s", err)
-	// 	return
-	// }
-	// encoder := toml.NewEncoder(bufio.NewWriter(dest))
-	// encoder.Encode(&cache)
+	inode := m.requireInode(path, syscall.S_IFLNK)
+	// we don’t need a lock here: the inode was just created and we still
+	// hold the lock on the whole cache
+	inode.(*linkInode).dest = dest
+	m.markInodeDirty(inode)
 
 	m.writeback()
 }
 
-func (m *FileCache) writeDirectory(node *inode) {
-	if node.Stat().Mode()&syscall.S_IFDIR == 0 {
-		panic(fmt.Sprintf(
-			"attempt to write non-directory as directory: %s",
-			node.name))
-	}
+func (m *FileCache) FetchLink(path string) (dest string, err backend.Error) {
+	path = normalizePath(path)
 
-	log.Printf("writeDirectory: writing dir %#v", node.name)
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-	storage_path := m.getStoragePath(node.path(), DIR_SUFFIX)
-	f, err := m.openStorage(storage_path, true)
+	inode, err := m.getInode(path)
+	log.Printf("FetchLink(%s): getInode -> %s, %s", path, inode, err)
 	if err != nil {
-		log.Printf(
-			"writeDirectory: failed to open inode data for writing: %s",
-			err,
-		)
-		return
-	}
-	defer f.Close()
-
-	cache := dirCache{}
-	cache.Entries = make([]dirCacheEntry, len(node.children))
-	var i = 0
-	for name, entry := range node.children {
-		cache.Entries[i].NameV = name
-		cache.Entries[i] = entry.cache
-		i += 1
+		return "", err
 	}
 
-	encoder := toml.NewEncoder(f)
-	err = encoder.Encode(&cache)
-	if err != nil {
-		log.Printf(
-			"writeDirectory: failed to write: %s\n",
-			err,
-		)
-		os.Remove(storage_path)
+	if inode.attr().Mode()&syscall.S_IFMT != syscall.S_IFLNK {
+		log.Printf("FetchLink(%s): not a symlink: %d != %d",
+			path,
+			inode.attr().Mode()&syscall.S_IFMT,
+			syscall.S_IFLNK)
+		return "", backend.WrapError(syscall.EINVAL)
 	}
+
+	return inode.(*linkInode).dest, nil
 }
 
-func (m *FileCache) writeRootInode() {
-	storage_path := filepath.Join(m.root_dir, ROOT_INODE_NAME)
-	f, err := CreateSafe(storage_path)
-	if err != nil {
-		log.Printf(
-			"writeRootInode: failed to open inode data for writing"+
-				": %s\n",
-			err,
-		)
-		return
-	}
+func (m *FileCache) PutDir(path string, entries []backend.DirEntry) {
+	path = normalizePath(path)
 
-	stat := m.root_node.Stat()
-	entry := dirCacheEntry{
-		NameV:  "",
-		ModeV:  stat.Mode(),
-		MtimeV: stat.Mtime(),
-		AtimeV: stat.Atime(),
-		CtimeV: stat.Ctime(),
-		SizeV:  stat.Size(),
-		UidV:   stat.OwnerUID(),
-		GidV:   stat.OwnerGID(),
-	}
+	log.Printf("PutDir(%s, %s)", path, entries)
 
-	encoder := toml.NewEncoder(f)
-	err = encoder.Encode(&entry)
-	if err != nil {
-		log.Printf(
-			"writeDirectory: failed to write: %s\n",
-			err,
-		)
-		f.Abort()
-		return
-	}
-	f.Close()
-}
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-func (m *FileCache) writeMetadata() {
-	storage_path := filepath.Join(m.root_dir, ROOT_STATE_NAME)
-	f, err := CreateSafe(storage_path)
-	if err != nil {
-		log.Printf(
-			"writeMetadata: failed to open inode data for writing"+
-				": %s\n",
-			err,
-		)
-		return
+	inode := m.requireInode(path, syscall.S_IFDIR)
+	log.Printf("PutDir(%s): new inode format: %d",
+		path,
+		inode.attr().Mode()&syscall.S_IFMT)
+	dir_inode := inode.(*dirInode)
+	dir_inode.children = make([]string, len(entries))
+	log.Printf("PutDir(%s): setting up %d children", path, len(entries))
+	for i, entry := range entries {
+		child_name := entry.Name()
+		dir_inode.children[i] = child_name
+		child_path := path + "/" + child_name
+		m.putAttr(child_path, entry.Stat())
 	}
+	m.markInodeDirty(inode)
 
-	encoder := toml.NewEncoder(f)
-	err = encoder.Encode(&m.metadata)
-	if err != nil {
-		log.Printf(
-			"writeMetadata: failed to write: %s\n",
-			err,
-		)
-		f.Abort()
-		return
-	}
-	f.Close()
+	m.writeback()
 }
 
 func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
+	path = normalizePath(path)
+
+	log.Printf("FetchDir(%s)", path)
+
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -541,445 +453,52 @@ func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
 		return nil, err
 	}
 
-	log.Printf("FetchDir: inode = %v", inode)
-
-	children, err := m.inodeChildren(inode)
-	if err != nil {
-		return nil, err
+	if inode.attr().Mode()&syscall.S_IFMT != syscall.S_IFDIR {
+		log.Printf("FetchDir(%s): not a directory: %d != %d",
+			path,
+			inode.attr().Mode()&syscall.S_IFMT,
+			syscall.S_IFDIR)
+		return nil, backend.WrapError(syscall.ENOTDIR)
 	}
 
-	result := make([]backend.DirEntry, len(children))
-	var i = 0
-	for _, child := range children {
-		result[i] = child
-		i += 1
+	dir_inode := inode.(*dirInode)
+	result := make([]backend.DirEntry, len(dir_inode.children))
+	for i, name := range dir_inode.children {
+		full_path := path + "/" + name
+		attr, err := m.fetchAttr(full_path)
+		if err != nil {
+			attr = &dirCacheEntry{}
+		}
+		result[i] = &dirCacheEntry{
+			NameV:   name,
+			ModeV:   attr.Mode(),
+			MtimeV:  attr.Mtime(),
+			AtimeV:  attr.Atime(),
+			CtimeV:  attr.Ctime(),
+			SizeV:   attr.Size(),
+			UidV:    attr.OwnerUID(),
+			GidV:    attr.OwnerGID(),
+			BlocksV: 0,
+		}
 	}
 
 	return result, nil
 }
 
-func (m *FileCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
+func (m *FileCache) Close() {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	inode, err := m.getInode(path)
-	if err != nil {
-		return nil, err
-	}
-
-	return inode.Stat(), nil
-}
-
-func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	inode, err := m.getInode(path)
-	if err != nil {
-		log.Printf("PutAttr: getInode failed for %#v: %s", path, err)
-		return
-	}
-	updateStatToCache(stat, &inode.cache)
-
-	if path == "" {
-		// root inode
-		m.markInodeStale(inode)
-		m.writeback()
-	}
-}
-
-func (m *FileCache) PutLink(path string, dest string) {
-	storage_path := m.getStoragePath(path, LINK_SUFFIX)
-	f, err := m.openStorage(storage_path, true)
-	if err != nil {
-		return
-	}
-
-	_, err = f.WriteString(dest)
-	if err != nil {
-		f.Abort()
-		return
-	}
-	f.Close()
-}
-
-func (m *FileCache) FetchLink(path string) (string, backend.Error) {
-	f, err := m.openStorage(m.getStoragePath(path, LINK_SUFFIX), false)
-	if err != nil {
-		return "", backend.WrapError(syscall.Errno(syscall.EIO))
-	}
-	defer f.Close()
-
-	dest := make([]byte, 0, 256)
-	part := make([]byte, 256)
-	var n int
-	for n, err = f.Read(part); n > 0; n, err = f.Read(part) {
-		dest = append(dest, part[:n]...)
-	}
-
-	if err != nil && err != io.EOF {
-		return "", backend.WrapError(syscall.Errno(syscall.EIO))
-	}
-
-	return string(dest), nil
-}
-
-func (m *FileCache) deleteRecursively(node *inode, path string) {
-	log.Printf("FileCache: deleteRecursively: at %#v, inode %v", path, node)
-
-	children, _ := m.inodeChildren(node)
-	if children != nil {
-		for _, child := range children {
-			m.deleteRecursively(
-				child,
-				filepath.Join(path, child.name),
-			)
-		}
-	}
-
-	// FIXME: delete file metadata
-	mode := node.Mode()
-	storage_path_base := m.getStoragePath(path, "")
-	if mode&syscall.S_IFDIR != 0 {
-		// is a directory, delete directory
-		os.Remove(storage_path_base + DIR_SUFFIX)
-	} else if mode&syscall.S_IFLNK != 0 {
-		os.Remove(storage_path_base + LINK_SUFFIX)
-	}
-
-	delete(m.staleInodes, node)
-}
-
-func (m *FileCache) Delete(path string) {
-	log.Printf("FileCache: deleting %#v recursively", path)
-
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	node, err := m.getInode(path)
-	if err != nil {
-		// appears to not be cached
-		return
-	}
-
-	m.deleteRecursively(node, path)
-	delete(node.parent.children, node.name)
-	m.markInodeStale(node.parent)
 	m.writeback()
+	// TODO: close open file handles
+	m.inodes = nil
+	m.dirtyInodes = nil
 }
 
-func (m *FileCache) writeback() {
-	log.Printf(
-		"writeback: %d stale inodes; metadata stale: %s",
-		len(m.staleInodes),
-		m.metadataStale,
-	)
-
-	if m.metadataStale {
-		m.writeMetadata()
-	}
-
-	for node, _ := range m.staleInodes {
-		if node == m.root_node {
-			m.writeRootInode()
-		}
-		if node.Mode()&syscall.S_IFDIR != 0 {
-			m.writeDirectory(node)
-		}
-		delete(m.staleInodes, node)
-	}
+func (m *FileCache) SetBlocksTotal(new_blocks uint64) {
+	m.quota.blocksTotal = new_blocks
 }
 
-func (m *FileCache) markInodeStale(node *inode) {
-	m.staleInodes[node] = true
-}
-
-func (m *FileCache) OpenForStore(
-	path string,
-	mtime uint64,
-	size uint64,
-) (CachedFileHandle, backend.Error) {
-	storage_path_base := m.getStoragePath(path, "")
-	m.createStorageDirs(storage_path_base)
-
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	node, err := m.getInode(path)
-	if err != nil {
-		return nil, err
-	}
-
-	if node.file != nil {
-		return node.file, nil
-	}
-
-	data_storage_path := storage_path_base + DATA_SUFFIX
-	blockmap_storage_path := storage_path_base + BLOCKMAP_SUFFIX
-
-	dataf, oserr := os.OpenFile(
-		data_storage_path,
-		os.O_CREATE|os.O_RDWR,
-		0600,
-	)
-	if oserr != nil {
-		return nil, backend.NewBackendError(
-			oserr.Error(),
-			syscall.EIO,
-		)
-	}
-	blockmapf, oserr := os.OpenFile(
-		blockmap_storage_path,
-		os.O_CREATE|os.O_RDWR,
-		0600,
-	)
-	if oserr != nil {
-		dataf.Close()
-		return nil, backend.NewBackendError(
-			oserr.Error(),
-			syscall.EIO,
-		)
-	}
-
-	return &FileHandle{
-		path:          path,
-		cache:         m,
-		lock:          new(sync.Mutex),
-		data_file:     dataf,
-		blockmap_file: blockmapf,
-		blockmap:      nil,
-		refcnt:        1,
-	}, nil
-}
-
-func (m *FileCache) closeHandle(handle *FileHandle) {
-	if m.fileHandles[handle.path] != handle {
-		panic("inconsistent internal state: handle isn’t at expected path")
-	}
-
-	delete(m.fileHandles, handle.path)
-}
-
-func (m *FileCache) requestBlocks(path string, nblocks uint64, priority int) bool {
-	// request a number of blocks, return true if request passes by quota
-	// priority is ignored for now, but in the future, it should behave like this:
-	//
-	//     readahead -> no blocks are ever evicted for this
-	//     read, written -> apply usual eviction
-	//
-	// (written may get different semantics based on eviction pattern)
-	log.Printf("requestBlocks: request for %d blocks", nblocks)
-	if nblocks == 0 {
-		return true
-	}
-
-	free_blocks := m.metadata.Quota.BlocksTotal - m.metadata.Quota.BlocksUsed
-	if free_blocks < nblocks {
-		return false
-	}
-
-	inode, err := m.getInode(path)
-	if err != nil {
-		return false
-	}
-
-	inode.cache.BlocksV += nblocks
-	m.markInodeStale(inode.parent)
-	m.metadata.Quota.BlocksUsed += nblocks
-	m.metadataStale = true
-	m.writeback()
-
-	return true
-}
-
-type FileHandle struct {
-	path          string
-	cache         *FileCache
-	lock          *sync.Mutex
-	data_file     *os.File
-	blockmap_file *os.File
-	blockmap      mmap.MMap
-	refcnt        uint64
-}
-
-func (m *FileHandle) ensureBlockmapMapped() {
-	if m.blockmap != nil {
-		return
-	}
-
-	blockmap, err := mmap.Map(m.blockmap_file, mmap.RDWR, 0)
-	if err != nil {
-		panic("failed to mmap blockmap!")
-	}
-	m.blockmap = blockmap
-}
-
-func (m *FileHandle) ensureBlockmapSize(last int64) {
-	if m.blockmap != nil && int64(len(m.blockmap)) >= last {
-		// large enough
-		return
-	}
-
-	m.truncateAndRemap(last + 1)
-}
-
-func (m *FileHandle) truncateAndRemap(size int64) {
-	// ensure that changes are written to disk first
-	m.data_file.Sync()
-	m.blockmap.Flush()
-
-	m.blockmap.Unmap()
-	m.blockmap = nil
-	m.blockmap_file.Truncate(size)
-
-	m.ensureBlockmapMapped()
-
-	if int64(len(m.blockmap)) != size {
-		panic("failed to resize blockmap!")
-	}
-
-}
-
-func (m *FileHandle) truncateBlockmap(last int64) {
-	if m.blockmap != nil && int64(len(m.blockmap)) == last+1 {
-		// large enough
-		return
-	}
-
-	m.truncateAndRemap(last + 1)
-}
-
-func (m *FileHandle) PutReadData(data []byte, position int64, at_eof bool) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	if position%BLOCK_SIZE != 0 || (len(data)%BLOCK_SIZE != 0 && !at_eof) {
-		panic("read is not aligned to block size")
-	}
-
-	nblocks := (len(data) + BLOCK_SIZE - 1) / BLOCK_SIZE
-	firstBlock := position / BLOCK_SIZE
-	lastBlock := firstBlock + int64(nblocks) - 1
-
-	var newBlocks int64 = 0
-
-	lastBlockmapBlock := int64(len(m.blockmap) - 1)
-	lastIterBlock := lastBlock
-	if lastIterBlock > lastBlockmapBlock {
-		newBlocks += lastIterBlock - lastBlockmapBlock
-		lastIterBlock = lastBlockmapBlock
-	}
-	for i := firstBlock; i <= lastIterBlock; i += 1 {
-		if m.blockmap[i] == 0 {
-			newBlocks += 1
-		}
-	}
-
-	if newBlocks > 0 && !m.cache.requestBlocks(m.path, uint64(newBlocks), block_prio_read) {
-		log.Printf("blocks rejected by quota management, not writing")
-		return
-	}
-
-	m.ensureBlockmapSize(lastBlock)
-
-	_, err := m.data_file.WriteAt(data, position)
-	if err != nil {
-		log.Printf("failed to write to cache file: %s", err)
-		return
-	}
-
-	if at_eof {
-		m.data_file.Truncate(position + int64(len(data)))
-		m.truncateBlockmap(lastBlock)
-	}
-
-	m.data_file.Sync()
-
-	for i := firstBlock; i <= lastBlock; i += 1 {
-		m.blockmap[i] = 1
-	}
-
-	m.blockmap.Flush()
-}
-
-func truncateRead(position int64, length int64, lastReadableBlock int64) int64 {
-	lastByte := position + length - 1
-	lastReadableByte := (lastReadableBlock+1)*4096 - 1
-
-	toOmit := lastByte - lastReadableByte
-	return length - toOmit
-}
-
-func (m *FileHandle) ReadData(data []byte, position int64) (int, backend.Error) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	firstBlock := position / BLOCK_SIZE
-	nblocks := (len(data) + BLOCK_SIZE - 1) / BLOCK_SIZE
-	lastBlock := firstBlock + int64(nblocks) - 1
-
-	readLength := len(data)
-
-	m.ensureBlockmapMapped()
-
-	log.Printf("ReadData: firstBlock=%d, nblocks=%d lastBlock=%d readLength=%d",
-		firstBlock,
-		nblocks,
-		lastBlock,
-		readLength)
-
-	lastReadableBlock := firstBlock
-	lastCheckableBlock := lastBlock
-	if int64(len(m.blockmap)) <= lastCheckableBlock {
-		lastCheckableBlock = int64(len(m.blockmap) - 1)
-	}
-	if lastReadableBlock > lastCheckableBlock {
-		// read is definitely out of bounds, no need to check blockmap
-		lastReadableBlock = firstBlock - 1
-	} else {
-		for ; lastReadableBlock <= lastCheckableBlock; lastReadableBlock += 1 {
-			if m.blockmap[lastReadableBlock] == 0 {
-				lastReadableBlock -= 1
-				break
-			}
-		}
-	}
-
-	truncated := false
-	if lastReadableBlock < lastBlock {
-		// bad, we don’t have the requested data
-		// truncate read and return EIO
-		readLength = int(truncateRead(position, int64(len(data)),
-			lastReadableBlock))
-		truncated = true
-	}
-
-	log.Printf("ReadData: lastReadableBlock=%d lastCheckableBlock=%d truncated=%s",
-		lastReadableBlock,
-		lastCheckableBlock,
-		truncated)
-
-	n, err := m.data_file.ReadAt(data[:readLength], position)
-	if err != io.EOF && err != nil {
-		return n, backend.WrapError(err)
-	} else if truncated {
-		return n, backend.WrapError(syscall.EIO)
-	} else {
-		return n, nil
-	}
-}
-
-func (m *FileHandle) Close() {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	log.Printf("decreasing refcount on file handle %#v", m)
-
-	m.refcnt -= 1
-	if m.refcnt == 0 {
-		m.cache.closeHandle(m)
-	}
-}
-
-func (m *FileHandle) purge() {
+func (m *FileCache) BlockSize() int64 {
+	return BLOCK_SIZE
 }

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"syscall"
 
 	"github.com/horazont/dragonstash/internal/backend"
 )
@@ -79,6 +80,12 @@ type Cache interface {
 
 	// Retrieve the attributes of a path.
 	FetchAttr(path string) (backend.FileStat, backend.Error)
+
+	// The block size of the cache
+	BlockSize() int64
+
+	// Close all open files and flush dirty buffers to disk
+	Close()
 }
 
 type CachedFile interface {
@@ -106,4 +113,66 @@ type CachedFile interface {
 
 	// Close the open file
 	Close()
+}
+
+type dummyCache struct {
+}
+
+func NewDummyCache() Cache {
+	return &dummyCache{}
+}
+
+func (m *dummyCache) OpenFile(path string) (CachedFile, backend.Error) {
+	return nil, backend.WrapError(syscall.EIO)
+}
+
+func (m *dummyCache) PutDir(path string, entries []backend.DirEntry) {
+}
+
+func (m *dummyCache) PutAttr(path string, attr backend.FileStat) {
+}
+
+func (m *dummyCache) PutLink(path string, dest string) {
+}
+
+func (m *dummyCache) PutNonExistant(path string) {
+}
+
+func (m *dummyCache) FetchLink(path string) (dest string, err backend.Error) {
+	return "", backend.WrapError(syscall.EIO)
+}
+
+func (m *dummyCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
+	return nil, backend.WrapError(syscall.EIO)
+}
+
+func (m *dummyCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
+	return nil, backend.WrapError(syscall.EIO)
+}
+
+func (m *dummyCache) BlockSize() int64 {
+	return 1
+}
+
+func (m *dummyCache) Close() {
+}
+
+type dummyCachedFile struct {
+}
+
+func NewDummyCachedFile() CachedFile {
+	return &dummyCachedFile{}
+}
+
+func (m *dummyCachedFile) PutData(data []byte, position int64, at_eof bool,
+	written bool) backend.Error {
+	return nil
+}
+
+func (m *dummyCachedFile) FetchData(data []byte, position int64) (int, backend.Error) {
+	return 0, backend.WrapError(syscall.EIO)
+}
+
+func (m *dummyCachedFile) Close() {
+
 }
