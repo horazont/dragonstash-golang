@@ -1,4 +1,4 @@
-package backend
+package layer
 
 type FileSystem interface {
 	Lstat(path string) (FileStat, Error)

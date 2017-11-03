@@ -4,15 +4,15 @@ import (
 	"github.com/hanwen/go-fuse/fuse"
 	"github.com/hanwen/go-fuse/fuse/nodefs"
 	"github.com/hanwen/go-fuse/fuse/pathfs"
-	"github.com/horazont/dragonstash/internal/backend"
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 type DragonStashFS struct {
 	pathfs.FileSystem
-	fs backend.FileSystem
+	fs layer.FileSystem
 }
 
-func NewDragonStashFS(fs backend.FileSystem) *DragonStashFS {
+func NewDragonStashFS(fs layer.FileSystem) *DragonStashFS {
 	return &DragonStashFS{
 		FileSystem: pathfs.NewDefaultFileSystem(),
 		fs:         fs,
@@ -72,10 +72,10 @@ func (m *DragonStashFS) Open(path string, flags uint32, context *fuse.Context) (
 
 type DragonStashFile struct {
 	nodefs.File
-	file backend.File
+	file layer.File
 }
 
-func wrapFile(f backend.File) *DragonStashFile {
+func wrapFile(f layer.File) *DragonStashFile {
 	return &DragonStashFile{
 		nodefs.NewDefaultFile(),
 		f,

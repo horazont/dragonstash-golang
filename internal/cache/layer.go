@@ -4,15 +4,15 @@ import (
 	"log"
 	"syscall"
 
-	"github.com/horazont/dragonstash/internal/backend"
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 type CacheLayer struct {
 	cache Cache
-	fs    backend.FileSystem
+	fs    layer.FileSystem
 }
 
-func NewCacheLayer(cache Cache, fs backend.FileSystem) *CacheLayer {
+func NewCacheLayer(cache Cache, fs layer.FileSystem) *CacheLayer {
 	return &CacheLayer{
 		cache: cache,
 		fs:    fs,
@@ -27,7 +27,7 @@ func (m *CacheLayer) Join(elems ...string) string {
 	return m.fs.Join(elems...)
 }
 
-func (m *CacheLayer) Lstat(path string) (backend.FileStat, backend.Error) {
+func (m *CacheLayer) Lstat(path string) (layer.FileStat, layer.Error) {
 	log.Printf("Lstat(%s)", path)
 	if !m.fs.IsReady() {
 		return m.cache.FetchAttr(path)
@@ -43,7 +43,7 @@ func (m *CacheLayer) Lstat(path string) (backend.FileStat, backend.Error) {
 	return stat, err
 }
 
-func (m *CacheLayer) OpenDir(path string) ([]backend.DirEntry, backend.Error) {
+func (m *CacheLayer) OpenDir(path string) ([]layer.DirEntry, layer.Error) {
 	if !m.fs.IsReady() {
 		return m.cache.FetchDir(path)
 	} else {
@@ -60,7 +60,7 @@ func (m *CacheLayer) OpenDir(path string) ([]backend.DirEntry, backend.Error) {
 	}
 }
 
-func (m *CacheLayer) Readlink(path string) (string, backend.Error) {
+func (m *CacheLayer) Readlink(path string) (string, layer.Error) {
 	if !m.fs.IsReady() {
 		return m.cache.FetchLink(path)
 	} else {
@@ -76,7 +76,7 @@ func (m *CacheLayer) Readlink(path string) (string, backend.Error) {
 	}
 }
 
-func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Error) {
+func (m *CacheLayer) OpenFile(path string, flags int) (layer.File, layer.Error) {
 	f, err := m.fs.OpenFile(path, flags)
 	if err != nil && !IsUnavailableError(err) {
 		return f, err
@@ -100,7 +100,7 @@ func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Err
 	}
 
 	if f == nil && cachef == nil {
-		return nil, backend.WrapError(syscall.EIO)
+		return nil, layer.WrapError(syscall.EIO)
 	}
 
 	return wrapFile(cachef, f, m.cache.BlockSize()), nil
@@ -109,10 +109,10 @@ func (m *CacheLayer) OpenFile(path string, flags int) (backend.File, backend.Err
 type CacheLayerFile struct {
 	blocksize int64
 	cacheside CachedFile
-	fsside    backend.File
+	fsside    layer.File
 }
 
-func wrapFile(cacheside CachedFile, fsside backend.File, blocksize int64) backend.File {
+func wrapFile(cacheside CachedFile, fsside layer.File, blocksize int64) layer.File {
 	return &CacheLayerFile{
 		blocksize: blocksize,
 		cacheside: cacheside,
@@ -139,7 +139,7 @@ func alignRead(
 	return new_position, new_length, offset
 }
 
-func (m *CacheLayerFile) Read(dest []byte, position int64) (int, backend.Error) {
+func (m *CacheLayerFile) Read(dest []byte, position int64) (int, layer.Error) {
 	if m.cacheside == nil {
 		return m.fsside.Read(dest, position)
 	}

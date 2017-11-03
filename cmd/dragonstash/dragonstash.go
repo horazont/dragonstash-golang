@@ -14,9 +14,10 @@ import (
 	"github.com/hanwen/go-fuse/fuse"
 	"github.com/hanwen/go-fuse/fuse/nodefs"
 	"github.com/hanwen/go-fuse/fuse/pathfs"
-	"github.com/horazont/dragonstash/internal/backend"
 	"github.com/horazont/dragonstash/internal/cache"
+	"github.com/horazont/dragonstash/internal/filecache"
 	"github.com/horazont/dragonstash/internal/frontend"
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 func writeMemProfile(fn string, sigs <-chan os.Signal) {
@@ -74,11 +75,11 @@ func main() {
 	cachedir := flag.Arg(1)
 	mountpoint := flag.Arg(2)
 
-	filecache := cache.NewFileCache(cachedir)
+	filecache := filecache.NewFileCache(cachedir)
 	filecache.SetBlocksTotal(16)
 
-	// back_fs := backend.NewLocalFileSystem(flag.Arg(0))
-	back_fs := backend.NewDefaultFileSystem()
+	// back_fs := localfs.NewLocalFileSystem(flag.Arg(0))
+	back_fs := layer.NewDefaultFileSystem()
 	cache_layer := cache.NewCacheLayer(filecache, back_fs)
 	front_fs := frontend.NewDragonStashFS(cache_layer)
 

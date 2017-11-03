@@ -1,4 +1,4 @@
-package cache
+package filecache
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/horazont/dragonstash/internal/backend"
+	"github.com/horazont/dragonstash/internal/layer"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -56,7 +56,7 @@ func (m *mockDirEntry) Size() uint64 {
 	return m.SizeV
 }
 
-func (m *mockDirEntry) Stat() backend.FileStat {
+func (m *mockDirEntry) Stat() layer.FileStat {
 	return m
 }
 
@@ -249,7 +249,7 @@ func TestPutDirAndFetchDir(t *testing.T) {
 
 	cache := NewFileCache(dir)
 
-	entries := make([]backend.DirEntry, 3)
+	entries := make([]layer.DirEntry, 3)
 	entries[0] = &mockDirEntry{
 		NameV:   "foo",
 		ModeV:   syscall.S_IFREG,
@@ -284,7 +284,7 @@ func TestPutDirAndFetchDir(t *testing.T) {
 		BlocksV: 4,
 	}
 
-	entrymap := make(map[string]backend.DirEntry)
+	entrymap := make(map[string]layer.DirEntry)
 	for _, entry := range entries {
 		entrymap[entry.Name()] = entry
 	}
@@ -296,7 +296,7 @@ func TestPutDirAndFetchDir(t *testing.T) {
 	assert.NotNil(t, entries2)
 	assert.Nil(t, err)
 
-	entrymap2 := make(map[string]backend.DirEntry)
+	entrymap2 := make(map[string]layer.DirEntry)
 	for _, entry := range entries2 {
 		entrymap2[entry.Name()] = entry
 	}
@@ -324,7 +324,7 @@ func TestPutDirAndFetchAttr(t *testing.T) {
 
 	cache := NewFileCache(dir)
 
-	entries := make([]backend.DirEntry, 3)
+	entries := make([]layer.DirEntry, 3)
 	entries[0] = &mockDirEntry{
 		NameV:   "foo",
 		ModeV:   syscall.S_IFREG,
@@ -383,7 +383,7 @@ func TestPutDirPersistence(t *testing.T) {
 
 	cache_w := NewFileCache(dir)
 
-	entries := make([]backend.DirEntry, 3)
+	entries := make([]layer.DirEntry, 3)
 	entries[0] = &mockDirEntry{
 		NameV:   "foo",
 		ModeV:   syscall.S_IFREG,
@@ -418,7 +418,7 @@ func TestPutDirPersistence(t *testing.T) {
 		BlocksV: 4,
 	}
 
-	entrymap := make(map[string]backend.DirEntry)
+	entrymap := make(map[string]layer.DirEntry)
 	for _, entry := range entries {
 		entrymap[entry.Name()] = entry
 	}
@@ -433,7 +433,7 @@ func TestPutDirPersistence(t *testing.T) {
 	assert.NotNil(t, entries2)
 	assert.Nil(t, err)
 
-	entrymap2 := make(map[string]backend.DirEntry)
+	entrymap2 := make(map[string]layer.DirEntry)
 	for _, entry := range entries2 {
 		entrymap2[entry.Name()] = entry
 	}

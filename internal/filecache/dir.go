@@ -1,6 +1,6 @@
-package cache
+package filecache
 
-import "github.com/horazont/dragonstash/internal/backend"
+import "github.com/horazont/dragonstash/internal/layer"
 
 type dirCacheEntry struct {
 	NameV      string `toml:"name"`
@@ -20,7 +20,7 @@ type dirCache struct {
 	Entries []dirCacheEntry `toml:"entries"`
 }
 
-func fullDirEntryToCache(name string, stat backend.FileStat, dest *dirCacheEntry) {
+func fullDirEntryToCache(name string, stat layer.FileStat, dest *dirCacheEntry) {
 	dest.NameV = name
 	updateStatToCache(stat, dest)
 	dest.BlocksV = 0
@@ -28,7 +28,7 @@ func fullDirEntryToCache(name string, stat backend.FileStat, dest *dirCacheEntry
 	dest.SyncSizeV = 0
 }
 
-func updateStatToCache(stat backend.FileStat, dest *dirCacheEntry) {
+func updateStatToCache(stat layer.FileStat, dest *dirCacheEntry) {
 	dest.ModeV = stat.Mode()
 	dest.MtimeV = stat.Mtime()
 	dest.AtimeV = stat.Atime()
@@ -38,7 +38,7 @@ func updateStatToCache(stat backend.FileStat, dest *dirCacheEntry) {
 	dest.GidV = stat.OwnerGID()
 }
 
-func dirEntryToCache(path string, fs backend.FileSystem, entry backend.DirEntry, dest *dirCacheEntry) bool {
+func dirEntryToCache(path string, fs layer.FileSystem, entry layer.DirEntry, dest *dirCacheEntry) bool {
 	var err error = nil
 	stat := entry.Stat()
 	if stat == nil {
@@ -51,7 +51,7 @@ func dirEntryToCache(path string, fs backend.FileSystem, entry backend.DirEntry,
 	return true
 }
 
-func dirEntriesToCache(path string, fs backend.FileSystem, entries []backend.DirEntry) []dirCacheEntry {
+func dirEntriesToCache(path string, fs layer.FileSystem, entries []layer.DirEntry) []dirCacheEntry {
 	var dest = 0
 	result := make([]dirCacheEntry, len(entries))
 	for _, entry := range entries {
@@ -72,7 +72,7 @@ func (m *dirCacheEntry) Mode() uint32 {
 	return m.ModeV
 }
 
-func (m *dirCacheEntry) Stat() backend.FileStat {
+func (m *dirCacheEntry) Stat() layer.FileStat {
 	return m
 }
 

@@ -1,4 +1,4 @@
-package cache
+package filecache
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,8 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
-	"github.com/horazont/dragonstash/internal/backend"
+	"github.com/horazont/dragonstash/internal/cache"
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 const (
@@ -188,7 +189,7 @@ type FileCache struct {
 	lock        *sync.Mutex
 	root_dir    string
 	inodes      map[string]inode
-	quota       quotaInfo
+	quota       cache.QuotaInfo
 	dirtyInodes map[inode]bool
 }
 
@@ -258,7 +259,7 @@ func (m *FileCache) getStoragePath(path string, suffix string) string {
 }
 
 // Obtain the inode for a path
-func (m *FileCache) getInode(path string) (inode, backend.Error) {
+func (m *FileCache) getInode(path string) (inode, layer.Error) {
 	// first try to load the inode from the map
 	inode, ok := m.inodes[path]
 	if ok {
@@ -271,13 +272,13 @@ func (m *FileCache) getInode(path string) (inode, backend.Error) {
 	file, err := os.Open(backend_path)
 	if err != nil {
 		log.Printf("failed to open inode: %s", err)
-		return nil, backend.WrapError(syscall.EIO)
+		return nil, layer.WrapError(syscall.EIO)
 	}
 
 	inode, err = ReadInodeWithHeader(file)
 	if err != nil {
 		log.Printf("failed to decode inode: %s", err)
-		return nil, backend.WrapError(syscall.EIO)
+		return nil, layer.WrapError(syscall.EIO)
 	}
 
 	inode.attr().NameV = path
@@ -326,19 +327,19 @@ func (m *FileCache) deleteInode(path string) {
 	os.Remove(backend_path)
 }
 
-func (m *FileCache) OpenFile(path string) (CachedFile, backend.Error) {
+func (m *FileCache) OpenFile(path string) (cache.CachedFile, layer.Error) {
 	path = normalizePath(path)
 
-	return nil, backend.WrapError(syscall.EIO)
+	return nil, layer.WrapError(syscall.EIO)
 }
 
-func (m *FileCache) putAttr(path string, stat backend.FileStat) {
+func (m *FileCache) putAttr(path string, stat layer.FileStat) {
 	inode := m.requireInode(path, stat.Mode()&syscall.S_IFMT)
 	updateStatToCache(stat, inode.attr())
 	m.markInodeDirty(inode)
 }
 
-func (m *FileCache) PutAttr(path string, stat backend.FileStat) {
+func (m *FileCache) PutAttr(path string, stat layer.FileStat) {
 	path = normalizePath(path)
 
 	m.lock.Lock()
@@ -358,7 +359,7 @@ func (m *FileCache) PutNonExistant(path string) {
 	m.deleteInode(path)
 }
 
-func (m *FileCache) fetchAttr(path string) (backend.FileStat, backend.Error) {
+func (m *FileCache) fetchAttr(path string) (layer.FileStat, layer.Error) {
 	inode, err := m.getInode(path)
 	log.Printf("FetchAttr(%s): getInode -> %s, %s", path, inode, err)
 	if err != nil {
@@ -368,7 +369,7 @@ func (m *FileCache) fetchAttr(path string) (backend.FileStat, backend.Error) {
 	return inode.attr(), nil
 }
 
-func (m *FileCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
+func (m *FileCache) FetchAttr(path string) (layer.FileStat, layer.Error) {
 	path = normalizePath(path)
 
 	m.lock.Lock()
@@ -391,7 +392,7 @@ func (m *FileCache) PutLink(path string, dest string) {
 	m.writeback()
 }
 
-func (m *FileCache) FetchLink(path string) (dest string, err backend.Error) {
+func (m *FileCache) FetchLink(path string) (dest string, err layer.Error) {
 	path = normalizePath(path)
 
 	m.lock.Lock()
@@ -408,13 +409,13 @@ func (m *FileCache) FetchLink(path string) (dest string, err backend.Error) {
 			path,
 			inode.attr().Mode()&syscall.S_IFMT,
 			syscall.S_IFLNK)
-		return "", backend.WrapError(syscall.EINVAL)
+		return "", layer.WrapError(syscall.EINVAL)
 	}
 
 	return inode.(*linkInode).dest, nil
 }
 
-func (m *FileCache) PutDir(path string, entries []backend.DirEntry) {
+func (m *FileCache) PutDir(path string, entries []layer.DirEntry) {
 	path = normalizePath(path)
 
 	log.Printf("PutDir(%s, %s)", path, entries)
@@ -440,7 +441,7 @@ func (m *FileCache) PutDir(path string, entries []backend.DirEntry) {
 	m.writeback()
 }
 
-func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
+func (m *FileCache) FetchDir(path string) ([]layer.DirEntry, layer.Error) {
 	path = normalizePath(path)
 
 	log.Printf("FetchDir(%s)", path)
@@ -458,11 +459,11 @@ func (m *FileCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
 			path,
 			inode.attr().Mode()&syscall.S_IFMT,
 			syscall.S_IFDIR)
-		return nil, backend.WrapError(syscall.ENOTDIR)
+		return nil, layer.WrapError(syscall.ENOTDIR)
 	}
 
 	dir_inode := inode.(*dirInode)
-	result := make([]backend.DirEntry, len(dir_inode.children))
+	result := make([]layer.DirEntry, len(dir_inode.children))
 	for i, name := range dir_inode.children {
 		full_path := path + "/" + name
 		attr, err := m.fetchAttr(full_path)
@@ -496,7 +497,7 @@ func (m *FileCache) Close() {
 }
 
 func (m *FileCache) SetBlocksTotal(new_blocks uint64) {
-	m.quota.blocksTotal = new_blocks
+	m.quota.BlocksTotal = new_blocks
 }
 
 func (m *FileCache) BlockSize() int64 {

@@ -1,4 +1,4 @@
-package backend
+package localfs
 
 import (
 	"io"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 type LocalFileSystem struct {
@@ -19,7 +21,7 @@ func NewLocalFileSystem(root string) *LocalFileSystem {
 	}
 }
 
-func (m *LocalFileSystem) fullPath(path string) (string, Error) {
+func (m *LocalFileSystem) fullPath(path string) (string, layer.Error) {
 	path = filepath.Clean(path)
 	return filepath.Join(m.root, path), nil
 }
@@ -32,7 +34,7 @@ func (m *LocalFileSystem) Join(elems ...string) string {
 	return filepath.Join(elems...)
 }
 
-func (m *LocalFileSystem) Lstat(path string) (FileStat, Error) {
+func (m *LocalFileSystem) Lstat(path string) (layer.FileStat, layer.Error) {
 	fullPath, fserr := m.fullPath(path)
 	if fserr != nil {
 		return nil, fserr
@@ -40,13 +42,13 @@ func (m *LocalFileSystem) Lstat(path string) (FileStat, Error) {
 
 	stat, err := os.Lstat(fullPath)
 	if err != nil {
-		return nil, WrapError(err)
+		return nil, layer.WrapError(err)
 	}
 
 	return wrapFileInfo(stat), nil
 }
 
-func (m *LocalFileSystem) OpenDir(path string) ([]DirEntry, Error) {
+func (m *LocalFileSystem) OpenDir(path string) ([]layer.DirEntry, layer.Error) {
 	path, fserr := m.fullPath(path)
 	if fserr != nil {
 		return nil, fserr
@@ -54,19 +56,19 @@ func (m *LocalFileSystem) OpenDir(path string) ([]DirEntry, Error) {
 
 	dir, err := os.Open(path)
 	if err != nil {
-		return nil, WrapError(err)
+		return nil, layer.WrapError(err)
 	}
 	defer dir.Close()
 
-	entries := []DirEntry{}
-	buffer := make([]DirEntry, 2)
+	entries := []layer.DirEntry{}
+	buffer := make([]layer.DirEntry, 2)
 	for {
 		new, err := dir.Readdir(2)
 		if len(new) == 0 {
 			if err == io.EOF {
 				break
 			} else {
-				return nil, WrapError(err)
+				return nil, layer.WrapError(err)
 			}
 		}
 
@@ -79,7 +81,7 @@ func (m *LocalFileSystem) OpenDir(path string) ([]DirEntry, Error) {
 	return entries, nil
 }
 
-func (m *LocalFileSystem) Readlink(path string) (string, Error) {
+func (m *LocalFileSystem) Readlink(path string) (string, layer.Error) {
 	path, fserr := m.fullPath(path)
 	if fserr != nil {
 		return "", fserr
@@ -87,13 +89,13 @@ func (m *LocalFileSystem) Readlink(path string) (string, Error) {
 
 	result, err := os.Readlink(path)
 	if err != nil {
-		return "", WrapError(err)
+		return "", layer.WrapError(err)
 	}
 
 	return result, nil
 }
 
-func (m *LocalFileSystem) OpenFile(path string, flags int) (File, Error) {
+func (m *LocalFileSystem) OpenFile(path string, flags int) (layer.File, layer.Error) {
 	path, fserr := m.fullPath(path)
 	if fserr != nil {
 		return nil, fserr
@@ -101,7 +103,7 @@ func (m *LocalFileSystem) OpenFile(path string, flags int) (File, Error) {
 
 	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
-		return nil, WrapError(err)
+		return nil, layer.WrapError(err)
 	}
 
 	return newLocalFile(f), nil
@@ -127,7 +129,7 @@ func (m *LocalDirEntry) Mode() uint32 {
 	return m.wrapped.Mode()
 }
 
-func (m *LocalDirEntry) Stat() FileStat {
+func (m *LocalDirEntry) Stat() layer.FileStat {
 	return m.wrapped
 }
 
@@ -183,7 +185,7 @@ func newLocalFile(f *os.File) *LocalFile {
 	}
 }
 
-func (m *LocalFile) Read(dest []byte, position int64) (int, Error) {
+func (m *LocalFile) Read(dest []byte, position int64) (int, layer.Error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
@@ -195,16 +197,16 @@ func (m *LocalFile) Read(dest []byte, position int64) (int, Error) {
 	if err != nil {
 		log.Printf("Read(): %s\n", err)
 	}
-	return n, WrapError(err)
+	return n, layer.WrapError(err)
 }
 
-func (m *LocalFile) Stat() (FileStat, Error) {
+func (m *LocalFile) Stat() (layer.FileStat, layer.Error) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
 	stat, err := m.backend.Stat()
 	if err != nil {
-		return nil, WrapError(err)
+		return nil, layer.WrapError(err)
 	}
 
 	return wrapFileInfo(stat), nil

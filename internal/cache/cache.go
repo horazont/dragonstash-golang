@@ -4,7 +4,7 @@ import (
 	"errors"
 	"syscall"
 
-	"github.com/horazont/dragonstash/internal/backend"
+	"github.com/horazont/dragonstash/internal/layer"
 )
 
 var (
@@ -38,7 +38,7 @@ type Cache interface {
 	// Note: It is recommended to first issue a PutAttr to the file with the
 	// most-recent attributes to allow the cache to invalidate itself, if
 	// needed.
-	OpenFile(path string) (CachedFile, backend.Error)
+	OpenFile(path string) (CachedFile, layer.Error)
 
 	// Update a directory with new contents
 	//
@@ -49,14 +49,14 @@ type Cache interface {
 	// It is not necessary that the parent of the path is in the cache.
 	//
 	// The old and new information is merged.
-	PutDir(path string, entries []backend.DirEntry)
+	PutDir(path string, entries []layer.DirEntry)
 
 	// Update the attributes of a file, symlink or directory
 	//
 	// If the type of the object changes with this operation, the same as
 	// for normal type changes holds, except that the attribute information
 	// is considered up-to-date.
-	PutAttr(path string, stat backend.FileStat)
+	PutAttr(path string, stat layer.FileStat)
 
 	// Put a symlink in the cache
 	PutLink(path string, dest string)
@@ -71,15 +71,15 @@ type Cache interface {
 	// Returns EINVAL if the path is something other than a link.
 	//
 	// The usual error conditions apply.
-	FetchLink(path string) (dest string, err backend.Error)
+	FetchLink(path string) (dest string, err layer.Error)
 
 	// Retrieve a directory from the cache
 	//
 	// Returns ENOTDIR if path is something other than a directory.
-	FetchDir(path string) ([]backend.DirEntry, backend.Error)
+	FetchDir(path string) ([]layer.DirEntry, layer.Error)
 
 	// Retrieve the attributes of a path.
-	FetchAttr(path string) (backend.FileStat, backend.Error)
+	FetchAttr(path string) (layer.FileStat, layer.Error)
 
 	// The block size of the cache
 	BlockSize() int64
@@ -102,14 +102,14 @@ type CachedFile interface {
 	//
 	// Returns ErrMustBeAligned if the write must be aligned. No other
 	// errors are returned.
-	PutData(data []byte, position int64, at_eof bool, written bool) backend.Error
+	PutData(data []byte, position int64, at_eof bool, written bool) layer.Error
 
 	// Fetch data from the cache
 	//
 	// The number of bytes which have been read are returned. Reads to not
 	// need to be block aligned, but may be truncated at block boundaries if
 	// the next block is not in the cache.
-	FetchData(data []byte, position int64) (int, backend.Error)
+	FetchData(data []byte, position int64) (int, layer.Error)
 
 	// Close the open file
 	Close()
@@ -122,14 +122,14 @@ func NewDummyCache() Cache {
 	return &dummyCache{}
 }
 
-func (m *dummyCache) OpenFile(path string) (CachedFile, backend.Error) {
-	return nil, backend.WrapError(syscall.EIO)
+func (m *dummyCache) OpenFile(path string) (CachedFile, layer.Error) {
+	return nil, layer.WrapError(syscall.EIO)
 }
 
-func (m *dummyCache) PutDir(path string, entries []backend.DirEntry) {
+func (m *dummyCache) PutDir(path string, entries []layer.DirEntry) {
 }
 
-func (m *dummyCache) PutAttr(path string, attr backend.FileStat) {
+func (m *dummyCache) PutAttr(path string, attr layer.FileStat) {
 }
 
 func (m *dummyCache) PutLink(path string, dest string) {
@@ -138,16 +138,16 @@ func (m *dummyCache) PutLink(path string, dest string) {
 func (m *dummyCache) PutNonExistant(path string) {
 }
 
-func (m *dummyCache) FetchLink(path string) (dest string, err backend.Error) {
-	return "", backend.WrapError(syscall.EIO)
+func (m *dummyCache) FetchLink(path string) (dest string, err layer.Error) {
+	return "", layer.WrapError(syscall.EIO)
 }
 
-func (m *dummyCache) FetchDir(path string) ([]backend.DirEntry, backend.Error) {
-	return nil, backend.WrapError(syscall.EIO)
+func (m *dummyCache) FetchDir(path string) ([]layer.DirEntry, layer.Error) {
+	return nil, layer.WrapError(syscall.EIO)
 }
 
-func (m *dummyCache) FetchAttr(path string) (backend.FileStat, backend.Error) {
-	return nil, backend.WrapError(syscall.EIO)
+func (m *dummyCache) FetchAttr(path string) (layer.FileStat, layer.Error) {
+	return nil, layer.WrapError(syscall.EIO)
 }
 
 func (m *dummyCache) BlockSize() int64 {
@@ -165,12 +165,12 @@ func NewDummyCachedFile() CachedFile {
 }
 
 func (m *dummyCachedFile) PutData(data []byte, position int64, at_eof bool,
-	written bool) backend.Error {
+	written bool) layer.Error {
 	return nil
 }
 
-func (m *dummyCachedFile) FetchData(data []byte, position int64) (int, backend.Error) {
-	return 0, backend.WrapError(syscall.EIO)
+func (m *dummyCachedFile) FetchData(data []byte, position int64) (int, layer.Error) {
+	return 0, layer.WrapError(syscall.EIO)
 }
 
 func (m *dummyCachedFile) Close() {

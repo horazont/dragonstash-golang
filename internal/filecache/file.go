@@ -1,4 +1,4 @@
-package cache
+package filecache
 
 import (
 	"io/ioutil"
