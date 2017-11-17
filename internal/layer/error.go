@@ -35,6 +35,8 @@ func WrapError(err error) Error {
 		return newWrappedOSError(err, *cast)
 	case syscall.Errno:
 		return newWrappedOSError(err, cast)
+	case *wrappedOSError:
+		return cast
 	default:
 		return newWrappedOSError(err, syscall.Errno(syscall.EIO))
 	}

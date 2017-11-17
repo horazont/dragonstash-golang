@@ -3,6 +3,7 @@ package cache
 import (
 	"errors"
 	"syscall"
+	"time"
 
 	"github.com/horazont/dragonstash/internal/layer"
 )
@@ -102,7 +103,7 @@ type CachedFile interface {
 	//
 	// Returns ErrMustBeAligned if the write must be aligned. No other
 	// errors are returned.
-	PutData(data []byte, position int64, at_eof bool, written bool) layer.Error
+	PutData(data []byte, position int64) error
 
 	// Fetch data from the cache
 	//
@@ -110,6 +111,24 @@ type CachedFile interface {
 	// need to be block aligned, but may be truncated at block boundaries if
 	// the next block is not in the cache.
 	FetchData(data []byte, position int64) (int, layer.Error)
+
+	// Return the attributes of the opened file
+	//
+	// This may differ from the attributes at the opened path iff the file
+	// has been renamed or another file was moved over this file.
+	FetchAttr() (layer.FileStat, layer.Error)
+
+	// Sync all pending changes to persistent storage
+	//
+	// The cache must not rely on this to be called. Especially applications
+	// which open files in read-only mode won’t call Sync on them.
+	Sync()
+
+	Truncate(size uint64) layer.Error
+	Chown(uid uint32, gid uint32) layer.Error
+	Chmod(perms uint32) layer.Error
+	Utimens(atime *time.Time, mtime *time.Time) layer.Error
+	Allocate(off uint64, size uint64, mode uint32) layer.Error
 
 	// Close the open file
 	Close()
@@ -164,13 +183,39 @@ func NewDummyCachedFile() CachedFile {
 	return &dummyCachedFile{}
 }
 
-func (m *dummyCachedFile) PutData(data []byte, position int64, at_eof bool,
-	written bool) layer.Error {
+func (m *dummyCachedFile) PutData(data []byte, position int64) error {
 	return nil
 }
 
 func (m *dummyCachedFile) FetchData(data []byte, position int64) (int, layer.Error) {
 	return 0, layer.WrapError(syscall.EIO)
+}
+
+func (m *dummyCachedFile) FetchAttr() (layer.FileStat, layer.Error) {
+	return nil, layer.WrapError(syscall.EIO)
+}
+
+func (m *dummyCachedFile) Sync() {
+}
+
+func (m *dummyCachedFile) Truncate(size uint64) layer.Error {
+	return layer.WrapError(syscall.ENOSYS)
+}
+
+func (m *dummyCachedFile) Chown(uid uint32, gid uint32) layer.Error {
+	return layer.WrapError(syscall.ENOSYS)
+}
+
+func (m *dummyCachedFile) Chmod(perms uint32) layer.Error {
+	return layer.WrapError(syscall.ENOSYS)
+}
+
+func (m *dummyCachedFile) Utimens(atime *time.Time, mtime *time.Time) layer.Error {
+	return layer.WrapError(syscall.ENOSYS)
+}
+
+func (m *dummyCachedFile) Allocate(off uint64, size uint64, mode uint32) layer.Error {
+	return layer.WrapError(syscall.ENOSYS)
 }
 
 func (m *dummyCachedFile) Close() {

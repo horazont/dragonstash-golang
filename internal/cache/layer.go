@@ -171,7 +171,7 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, layer.Error) {
 			return n, err
 		}
 	}
-	m.cacheside.PutData(buffer[:n], new_position, int64(n) < new_length, false)
+	m.cacheside.PutData(buffer[:n], new_position)
 
 	start := offset
 	end := offset + int64(len(dest))

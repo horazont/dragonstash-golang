@@ -2,6 +2,12 @@ package filecache
 
 import "github.com/horazont/dragonstash/internal/layer"
 
+const (
+	fmt_REG = 1
+	fmt_DIR = 2
+	fmt_LNK = 3
+)
+
 type dirCacheEntry struct {
 	NameV      string `toml:"name"`
 	ModeV      uint32 `toml:"mode"`

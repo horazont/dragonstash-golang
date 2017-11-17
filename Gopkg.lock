@@ -14,6 +14,12 @@
   version = "v1.1.0"
 
 [[projects]]
+  branch = "master"
+  name = "github.com/edsrzf/mmap-go"
+  packages = ["."]
+  revision = "0bce6a6887123b67a60366d2c9fe2dfb74289d2e"
+
+[[projects]]
   name = "github.com/hanwen/go-fuse"
   packages = ["fuse","fuse/nodefs","fuse/pathfs","splice"]
   revision = "5690be47d614355a22931c129e1075c25a62e9ac"
@@ -26,14 +32,20 @@
   version = "v1.0.0"
 
 [[projects]]
+  branch = "master"
+  name = "github.com/stretchr/objx"
+  packages = ["."]
+  revision = "1a9d0bb9f541897e62256577b352fdbc1fb4fd94"
+
+[[projects]]
   name = "github.com/stretchr/testify"
-  packages = ["assert"]
+  packages = ["assert","mock"]
   revision = "69483b4bd14f5845b5a1e55bca19e954e827f1d0"
   version = "v1.1.4"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "7e0155d1b183906b39c7e2663a566fcf94df91e98ed3414853e94f085fa121d9"
+  inputs-digest = "678b8f4287c1ec9b7b25366d21c943337c1689ec2b79eabebac8dc6ce247e67e"
   solver-name = "gps-cdcl"
   solver-version = 1
