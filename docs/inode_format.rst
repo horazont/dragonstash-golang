@@ -16,20 +16,20 @@ Common inode format
 Inode info is stored in the following format:
 
 1. 3 bytes magic number: ``0x69, 0x6e, 0x6f``  (== ASCII "``ino``")
-2. 1 byte version number
+2. uint8 version number
 
 Version 0x01
 ------------
 
-1. 4 bytes ``mode``
-2. 4 bytes ``uid``
-3. 4 bytes ``gid``
+1. uint32 ``mode``
+2. uint32 ``uid``
+3. uint32 ``gid``
 4. 1 byte ``perms_modified`` flag (currently unused)
-5. 8 bytes ``mtime``
-6. 8 bytes ``atime``
-7. 8 bytes ``ctime``
+5. uint64 ``mtime``
+6. uint64 ``atime``
+7. uint64 ``ctime``
 8. 1 byte ``times_modified`` flag (currently unused)
-9. 8 bytes ``size``
+9. uint64 ``size``
 
 Extension Formats
 =================
@@ -43,12 +43,12 @@ Link inode extension format
 The link inode extension is used *iff* ``mode&syscall.S_IFMT == syscall.S_IFLNK``.
 
 1. 3 bytes magic number: ``0x4c, 0x4e, 0x4b`` (== ASCII "``LNK``")
-2. 1 byte version number
+2. uint8 version number
 
 Version 0x01
 ~~~~~~~~~~~~
 
-1. 4 bytes ``length``
+1. uint32 ``length``
 2. ``length`` bytes ``dest`` (link destination)
 
 Note: version 1 does support link destinations with up to 2048 bytes. Longer
@@ -60,15 +60,15 @@ Directory inode extension format
 The directory inode extension is used *iff* ``mode&syscall.S_IFMT == syscall.S_IFDIR``.
 
 1. 3 bytes magic number: ``0x44, 0x49, 0x52`` (== ASCII "``DIR``")
-2. 1 byte version number
+2. uint8 version number
 
 Version 0x01
 ~~~~~~~~~~~~
 
-1. 4 bytes ``nchildren``
+1. uint32 ``nchildren``
 2. ``nchildren`` times:
 
-   a. 4 bytes ``length``
+   a. uint32 ``length``
    b. ``length`` bytes ``name`` (directory entry name)
 
 Note: version 1 does support up to 65535 children and up to 1024 bytes per entry
@@ -83,12 +83,12 @@ the inode itself, file inodes are accompanied by a ``.data`` file which
 contains the actual file data.
 
 1. 3 bytes magic number: ``0x52, 0x45, 0x47`` (== ASCII "``REG``")
-2. 1 byte version number
+2. uint8 version number
 
 Version 0x01
 ~~~~~~~~~~~~
 
-1. 8 bytes ``blocks_used``
+1. uint64 ``blocks_used``
 2. padding up to (and excluding) offset ``0x80`` in the file. the number of
    padding bytes depends on the common inode version.
 3. blockmap v1 (see below)
