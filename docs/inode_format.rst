@@ -10,6 +10,12 @@ extension formats defined below. The extension format used depends on the
 type/format of the inode as specified in ``mode`` (see ``man 2 stat``, search
 for ``st_mode``).
 
+.. warning::
+
+   The format defined herein may change without notice and **without change in
+   version numbers** during pre-release development. (Releases will always have
+   a sane way to distinguish formats and well-defined formats for each version.)
+
 Common inode format
 ===================
 
