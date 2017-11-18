@@ -113,7 +113,7 @@ type fileInode struct {
 	file        *os.File
 	handle      *fileCachedFile
 	blockmmap   mmap.MMap
-	fileInode   []blockinfo
+	blockmap    []blockinfo
 }
 
 func openOrCreateFileInode(storage_path string) (result *fileInode, err error) {
@@ -191,15 +191,15 @@ func (m *fileInode) ensureMapped() {
 			m.backingSize(),
 			err))
 	}
-	m.fileInode =
-		(*(*[]blockinfo)(unsafe.Pointer(&m.blockmmap)))[fileInode_HEADER_SIZE/2:]
+	m.blockmap =
+		(*(*[]blockinfo)(unsafe.Pointer(&m.blockmmap)))[fileInode_HEADER_SIZE/fileInode_BLOCK_INFO_SIZE:]
 }
 
 func (m *fileInode) ensureUnmapped() {
 	if m.blockmmap == nil {
 		return
 	}
-	m.fileInode = nil
+	m.blockmap = nil
 	m.blockmmap.Flush()
 	m.blockmmap.Unmap()
 	m.blockmmap = nil
@@ -236,7 +236,7 @@ func (m *fileInode) IsAvailable(block uint64) bool {
 		return false
 	}
 	m.ensureMapped()
-	return m.fileInode[block].IsAvailable()
+	return m.blockmap[block].IsAvailable()
 }
 
 func (m *fileInode) SetWritten(start uint64, end uint64) {
@@ -253,7 +253,7 @@ func (m *fileInode) SetWritten(start uint64, end uint64) {
 	m.ensureMapped()
 	var new_blocks uint64
 	for i := start; i < end; i++ {
-		new, _ := m.fileInode[i].Touch()
+		new, _ := m.blockmap[i].Touch()
 		if new {
 			new_blocks += 1
 		}
@@ -273,7 +273,7 @@ func (m *fileInode) Discard(start uint64, end uint64) uint64 {
 	m.ensureMapped()
 	var ctr uint64
 	for i := start; i < end; i++ {
-		if m.fileInode[i].Discard() {
+		if m.blockmap[i].Discard() {
 			ctr += 1
 		}
 	}
@@ -288,7 +288,7 @@ func (m *fileInode) SetRead(start uint64, end uint64) {
 func (m *fileInode) getAvailableBlocks(start uint64, end uint64) uint64 {
 	var ctr uint64 = 0
 	for i := start; i < end; i++ {
-		if m.fileInode[i].IsAvailable() {
+		if m.blockmap[i].IsAvailable() {
 			ctr += 1
 		}
 	}
@@ -308,10 +308,10 @@ func (m *fileInode) Resize(nbytes uint64) (discarded uint64) {
 	if new_blocks < old_blocks {
 		m.ensureMapped()
 		discarded = m.getAvailableBlocks(new_blocks, old_blocks)
-	} else if nbytes > old_size && old_size > 0 {
+	} else if nbytes > old_size && old_size > 0 && old_size%BLOCK_SIZE != 0 {
 		m.ensureMapped()
-		// discard the last block if it was available
-		if m.fileInode[old_blocks-1].Discard() {
+		// discard the last block if it was available and file size wasn’t aligned
+		if m.blockmap[old_blocks-1].Discard() {
 			discarded = 1
 		}
 	}
@@ -365,40 +365,56 @@ func (m *fileInode) Close() error {
 }
 
 // Truncate a given read to the maximum available range of data
-func (m *fileInode) TruncateRead(position uint64, size uint64) uint64 {
+func (m *fileInode) TruncateRead(position uint64, size uint64) (actual_size uint64, at_eof bool) {
 	filesize := m.Size()
+	log.Printf("TruncateRead: position=%d, size=%d",
+		position, size)
 	if filesize == 0 {
 		// cannot map, bail out early
-		return 0
+		return 0, true
 	}
 
 	m.ensureMapped()
 
 	start_block := position / BLOCK_SIZE
+	end_byte := position + size
+	// truncating here saves us from a possibly expensive linear scan over
+	// non-existant blocks
+	if end_byte > filesize {
+		log.Printf("truncating at eof (%d)", filesize)
+		end_byte = filesize
+		size = end_byte - position
+		at_eof = true
+	}
 	end_block := (position + size + BLOCK_SIZE - 1) / BLOCK_SIZE
 	actual_end_block := end_block
 
 	for block := start_block; block < end_block; block++ {
-		if !m.fileInode[block].IsAvailable() {
+		if !m.blockmap[block].IsAvailable() {
 			actual_end_block = block
+			log.Printf("block %d not available, truncating here", block)
+			at_eof = false
+			break
 		}
 	}
 
 	if actual_end_block <= start_block {
-		return 0
+		return 0, false
 	}
 
 	actual_end_byte := actual_end_block * BLOCK_SIZE
-	end_byte := position + size
 
 	if actual_end_byte > end_byte {
 		actual_end_byte = end_byte
 	}
 	if actual_end_byte > filesize {
 		actual_end_byte = filesize
+		at_eof = true
 	}
-	actual_size := actual_end_byte - position
-	return actual_size
+	actual_size = actual_end_byte - position
+	log.Printf("TruncateRead: position=%d, size=%d -> %d",
+		position, size, actual_size)
+	return actual_size, at_eof
 }
 
 func (m *fileInode) Blocks() uint64 {

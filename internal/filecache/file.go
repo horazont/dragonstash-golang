@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/horazont/dragonstash/internal/cache"
 	"github.com/horazont/dragonstash/internal/layer"
@@ -45,12 +46,14 @@ func (m *fileCachedFile) incRef() {
 	m.refcnt += 1
 }
 
-func (m *fileCachedFile) decRef() {
+func (m *fileCachedFile) decRef() bool {
 	m.refcnt -= 1
 	if m.refcnt == 0 {
 		m.close()
 		m.inode.handle = nil
+		return true
 	}
+	return false
 }
 
 func (m *fileCachedFile) close() {
@@ -193,24 +196,29 @@ func (m *fileCachedFile) PutData(data []byte, position uint64) error {
 	return nil
 }
 
-func (m *fileCachedFile) FetchData(data []byte, position uint64) (int, error) {
+func (m *fileCachedFile) FetchData(data []byte, position uint64) (int, layer.Error) {
 	m.lock()
 	defer m.unlock()
 
 	length := uint64(len(data))
-	to_read := m.inode.TruncateRead(position, length)
+	to_read, at_eof := m.inode.TruncateRead(position, length)
+
+	log.Printf("FetchData: read of %d at %d truncated to %d",
+		length,
+		position,
+		to_read)
 
 	n, err := m.file.ReadAt(data[:to_read], int64(position))
 	if uint64(n) < length {
 		if err != nil {
 			return n, layer.WrapError(err)
-		} else {
+		} else if !at_eof {
 			// data not in cache
 			return n, layer.WrapError(syscall.EIO)
 		}
 	}
 
-	return n, err
+	return n, layer.WrapError(err)
 }
 
 func (m *fileCachedFile) FetchAttr() (layer.FileStat, layer.Error) {
@@ -233,10 +241,35 @@ func (m *fileCachedFile) Chown(uid uint32, gid uint32) layer.Error {
 	return nil
 }
 
+func (m *fileCachedFile) Sync() {
+	m.inode.Sync()
+	m.file.Sync()
+}
+
 func (m *fileCachedFile) Close() {
 	m.lock()
 	defer m.unlock()
 
 	// may invalidate this
-	m.decRef()
+	if !m.decRef() {
+		// this file wasn’t closed
+		// we do a sync now anyways
+		m.Sync()
+	}
+}
+
+func (m *fileCachedFile) Allocate(off uint64, size uint64, mode uint32) layer.Error {
+	return layer.WrapError(syscall.EIO)
+}
+
+func (m *fileCachedFile) Chmod(perms uint32) layer.Error {
+	return layer.WrapError(syscall.EIO)
+}
+
+func (m *fileCachedFile) Truncate(new_size uint64) layer.Error {
+	return layer.WrapError(syscall.EIO)
+}
+
+func (m *fileCachedFile) Utimens(mtime *time.Time, atime *time.Time) layer.Error {
+	return layer.WrapError(syscall.EIO)
 }

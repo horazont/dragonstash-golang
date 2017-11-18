@@ -486,3 +486,122 @@ func TestEmptyStringAndSlashAreEquivalentForFetchAttr(t *testing.T) {
 
 	cache.Close()
 }
+
+func TestOpenFile(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	cache := NewFileCache(dir)
+
+	attr1 := mockDirEntry{
+		ModeV: syscall.S_IFREG,
+	}
+
+	cache.PutAttr("/foo", &attr1)
+
+	f, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f)
+
+	cache.Close()
+}
+
+func TestOpenFilePutDataPersistency(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+	var err error
+	size := uint64(4096 + 2048)
+
+	cache := NewFileCache(dir)
+
+	attr1 := mockDirEntry{
+		ModeV: syscall.S_IFREG,
+	}
+
+	cache.PutAttr("/foo", &attr1)
+
+	f, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f)
+
+	ref := genData(int(size))
+
+	err = f.PutData(ref, 0)
+	assert.Nil(t, err)
+
+	cache.Close()
+
+	cache_r := NewFileCache(dir)
+
+	f, err = cache_r.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f)
+
+	attr2, err := cache_r.FetchAttr("/foo")
+	assert.Nil(t, err)
+	assert.Equal(t, size, attr2.Size())
+	assert.Equal(t, uint64(2), attr2.Blocks())
+
+	buf := make([]byte, size+1)
+	n, err := f.FetchData(buf, 0)
+	assert.Equal(t, int(size), n)
+	assert.Equal(t, ref, buf[:size])
+}
+
+func TestOpenFileIdempotent(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	cache := NewFileCache(dir)
+
+	attr1 := mockDirEntry{
+		ModeV: syscall.S_IFREG,
+	}
+
+	cache.PutAttr("/foo", &attr1)
+
+	f1, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f1)
+
+	f2, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f2)
+
+	assert.Equal(t, f1, f2)
+
+	cache.Close()
+}
+
+func TestOpenFileIdempotentWithClose(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	cache := NewFileCache(dir)
+
+	attr1 := mockDirEntry{
+		ModeV: syscall.S_IFREG,
+	}
+
+	cache.PutAttr("/foo", &attr1)
+
+	f1, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f1)
+
+	f2, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f2)
+
+	assert.Equal(t, f1, f2)
+
+	f2.Close()
+
+	f3, err := cache.OpenFile("/foo")
+	assert.Nil(t, err)
+	assert.NotNil(t, f3)
+
+	assert.Equal(t, f1, f3)
+
+	cache.Close()
+}

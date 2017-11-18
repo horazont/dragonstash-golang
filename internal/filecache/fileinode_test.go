@@ -201,7 +201,7 @@ func TestResizeDiscardsBlocks(t *testing.T) {
 	assert.Equal(t, uint64(2), discarded)
 }
 
-func TestTruncateRead(t *testing.T) {
+func TestTruncateReadEmpty(t *testing.T) {
 	dir := prepTempDir()
 	defer teardownTempDir(dir)
 
@@ -211,8 +211,9 @@ func TestTruncateRead(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, bm)
 
-	new_len := bm.TruncateRead(23, 4096)
+	new_len, at_eof := bm.TruncateRead(23, 4096)
 	assert.Equal(t, uint64(0), new_len)
+	assert.True(t, at_eof)
 }
 
 func TestTruncateReadToAvailableBlocks(t *testing.T) {
@@ -228,8 +229,9 @@ func TestTruncateReadToAvailableBlocks(t *testing.T) {
 	bm.Resize(4096 * 2)
 	bm.SetRead(0, 1)
 
-	new_len := bm.TruncateRead(23, 4096)
+	new_len, at_eof := bm.TruncateRead(23, 4096)
 	assert.Equal(t, uint64(4096-23), new_len)
+	assert.False(t, at_eof)
 }
 
 func TestTruncateReadToAvailableBlocks2(t *testing.T) {
@@ -245,8 +247,9 @@ func TestTruncateReadToAvailableBlocks2(t *testing.T) {
 	bm.Resize(4096 * 4)
 	bm.SetRead(0, 2)
 
-	new_len := bm.TruncateRead(23, 8192)
+	new_len, at_eof := bm.TruncateRead(23, 8192)
 	assert.Equal(t, uint64(8192-23), new_len)
+	assert.False(t, at_eof)
 }
 
 func TestResizeToNonMultipleOfBlockSize(t *testing.T) {
@@ -278,8 +281,9 @@ func TestTruncateReadToActualSizeOnLastBlock(t *testing.T) {
 	bm.Resize(1024)
 	bm.SetWritten(0, 1)
 
-	new_len := bm.TruncateRead(0, 4096)
+	new_len, at_eof := bm.TruncateRead(0, 4096)
 	assert.Equal(t, uint64(1024), new_len)
+	assert.True(t, at_eof)
 }
 
 func TestMarksLastBlockAsMissingOnExtension(t *testing.T) {
@@ -300,6 +304,27 @@ func TestMarksLastBlockAsMissingOnExtension(t *testing.T) {
 	assert.True(t, bm.IsAvailable(0))
 	assert.False(t, bm.IsAvailable(1))
 	assert.Equal(t, uint64(1), discarded)
+}
+
+func TestDoNotMarkLastBlockAsMissingIfAligned(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	file := dir + "/file"
+
+	bm, err := openOrCreateFileInode(file)
+	assert.Nil(t, err)
+	assert.NotNil(t, bm)
+
+	bm.Resize(4096 * 2)
+	bm.SetWritten(0, 2)
+
+	discarded := bm.Resize(4096 * 3)
+
+	assert.True(t, bm.IsAvailable(0))
+	assert.True(t, bm.IsAvailable(1))
+	assert.False(t, bm.IsAvailable(2))
+	assert.Equal(t, uint64(0), discarded)
 }
 
 func TestLastBlockStaysValidOnShrink(t *testing.T) {
@@ -417,4 +442,59 @@ func TestSetReadClipsAtBlockSize(t *testing.T) {
 
 	assert.Equal(t, uint64(1), bm.Blocks())
 	assert.False(t, bm.IsAvailable(1))
+}
+
+func TestTruncateReadInsideUnavailableBlock(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	file := dir + "/file"
+
+	bm, err := openOrCreateFileInode(file)
+	assert.Nil(t, err)
+	assert.NotNil(t, bm)
+
+	bm.Resize(4096 + 1234)
+
+	new_len, at_eof := bm.TruncateRead(2048, 4096)
+	assert.Equal(t, uint64(0), new_len)
+	assert.False(t, at_eof)
+}
+
+func TestTruncateReadStopsOnFirstUnavailableBlock(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	file := dir + "/file"
+
+	bm, err := openOrCreateFileInode(file)
+	assert.Nil(t, err)
+	assert.NotNil(t, bm)
+
+	bm.Resize(4096 * 4)
+
+	bm.SetWritten(0, 1)
+	bm.SetWritten(2, 3)
+
+	new_len, at_eof := bm.TruncateRead(0, 4096*4)
+	assert.Equal(t, uint64(4096), new_len)
+	assert.False(t, at_eof)
+}
+
+func TestTruncateReadRespectsEOF(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	file := dir + "/file"
+
+	bm, err := openOrCreateFileInode(file)
+	assert.Nil(t, err)
+	assert.NotNil(t, bm)
+
+	bm.Resize(4096 + 1234)
+	bm.SetWritten(0, 2)
+
+	new_len, at_eof := bm.TruncateRead(2048, 4096)
+	assert.Equal(t, uint64(2048+1234), new_len)
+	assert.True(t, at_eof)
 }

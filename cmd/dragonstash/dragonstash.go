@@ -110,4 +110,6 @@ func main() {
 
 	fmt.Println("Mounted!")
 	state.Serve()
+
+	filecache.Close()
 }

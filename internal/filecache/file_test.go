@@ -138,6 +138,32 @@ func TestAppendCanWriteWithoutAlignment(t *testing.T) {
 	assert.Equal(t, data_append[:3072], ref[5120:])
 }
 
+func TestFetchAtEof(t *testing.T) {
+	dir := prepTempDir()
+	defer teardownTempDir(dir)
+
+	var err error
+
+	quota := &mockQuotaService{}
+	inode, err := createEmptyInode(dir+"/file", syscall.S_IFREG)
+
+	f, err := openFileCachedFile(quota, inode.(*fileInode))
+	assert.Nil(t, err)
+	assert.NotNil(t, f)
+
+	data := genData(3000)
+
+	err = f.PutData(data, 8192)
+	assert.Nil(t, err)
+
+	ref := make([]byte, len(data)+1)
+	n, err := f.FetchData(ref, 8192)
+
+	assert.Nil(t, err)
+	assert.Equal(t, len(data), n)
+	assert.Equal(t, data, ref[:len(data)])
+}
+
 func TestFetchAttrUsesInode(t *testing.T) {
 	dir := prepTempDir()
 	defer teardownTempDir(dir)

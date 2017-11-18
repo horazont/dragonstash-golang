@@ -145,7 +145,7 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, layer.Error) {
 	}
 
 	if m.fsside == nil {
-		return m.cacheside.FetchData(dest, position)
+		return m.cacheside.FetchData(dest, uint64(position))
 	}
 
 	new_position, new_length, offset := alignRead(
@@ -164,14 +164,14 @@ func (m *CacheLayerFile) Read(dest []byte, position int64) (int, layer.Error) {
 	if err != nil {
 		if IsUnavailableError(err) {
 			// read data from cache instead
-			return m.cacheside.FetchData(dest, position)
+			return m.cacheside.FetchData(dest, uint64(position))
 		} else {
 			// read error, do not cache the data
 			// TODO: un-cache any cached data in that range
 			return n, err
 		}
 	}
-	m.cacheside.PutData(buffer[:n], new_position)
+	m.cacheside.PutData(buffer[:n], uint64(new_position))
 
 	start := offset
 	end := offset + int64(len(dest))

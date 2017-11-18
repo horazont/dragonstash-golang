@@ -103,14 +103,14 @@ type CachedFile interface {
 	//
 	// Returns ErrMustBeAligned if the write must be aligned. No other
 	// errors are returned.
-	PutData(data []byte, position int64) error
+	PutData(data []byte, position uint64) error
 
 	// Fetch data from the cache
 	//
 	// The number of bytes which have been read are returned. Reads to not
 	// need to be block aligned, but may be truncated at block boundaries if
 	// the next block is not in the cache.
-	FetchData(data []byte, position int64) (int, layer.Error)
+	FetchData(data []byte, position uint64) (int, layer.Error)
 
 	// Return the attributes of the opened file
 	//
@@ -183,11 +183,11 @@ func NewDummyCachedFile() CachedFile {
 	return &dummyCachedFile{}
 }
 
-func (m *dummyCachedFile) PutData(data []byte, position int64) error {
+func (m *dummyCachedFile) PutData(data []byte, position uint64) error {
 	return nil
 }
 
-func (m *dummyCachedFile) FetchData(data []byte, position int64) (int, layer.Error) {
+func (m *dummyCachedFile) FetchData(data []byte, position uint64) (int, layer.Error) {
 	return 0, layer.WrapError(syscall.EIO)
 }
 

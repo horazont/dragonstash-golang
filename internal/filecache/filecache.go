@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -76,7 +77,7 @@ func (m *FileCache) getStoragePath(path string, suffix string) string {
 }
 
 // Obtain the inode for a path
-func (m *FileCache) getInode(path string) (inode, layer.Error) {
+func (m *FileCache) getInode(path string) (inode, error) {
 	// first try to load the inode from the map
 	inode, ok := m.inodes[path]
 	if ok {
@@ -86,25 +87,33 @@ func (m *FileCache) getInode(path string) (inode, layer.Error) {
 	inode, err := openInode(m.getStoragePath(path, ""))
 	if err != nil {
 		log.Printf("failed to open inode: %s", err)
-		return nil, layer.WrapError(syscall.EIO)
+		return nil, syscall.EIO
 	}
 	return inode, nil
 }
 
 func (m *FileCache) requireInode(path string, format uint32) inode {
-	inode, ok := m.inodes[path]
-	if ok && inode.Mode()&syscall.S_IFMT == format {
-		// return existing inode if mode matches
-		return inode
-	} else {
-		// TODO: clean up old inode properly
+	inode, err := m.getInode(path)
+	if err == nil {
+		if inode.Mode()&syscall.S_IFMT == format {
+			// return existing inode if mode matches
+			return inode
+		} else {
+			// TODO: clean up old inode properly
+			log.Printf("existing inode at %s has mismatching format: %d != %d",
+				path,
+				format,
+				inode.Mode()&syscall.S_IFMT)
+		}
 	}
 
 	storage_path := m.getStoragePath(path, "")
 	os.MkdirAll(filepath.Dir(storage_path), 0700)
-	inode, err := createEmptyInode(storage_path, format)
+	inode, err = createEmptyInode(storage_path, format)
 	if err != nil {
-		return nil
+		panic(fmt.Sprintf("failed to create empty inode at %s: %s",
+			storage_path,
+			err))
 	}
 	m.inodes[path] = inode
 	m.markInodeDirty(inode)
@@ -124,7 +133,43 @@ func (m *FileCache) deleteInode(path string) {
 func (m *FileCache) OpenFile(path string) (cache.CachedFile, layer.Error) {
 	path = normalizePath(path)
 
-	return nil, layer.WrapError(syscall.EIO)
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	inode, err := m.getInode(path)
+	if err != nil {
+		log.Printf("cannot open file for erroneous/non-existant inode (%s)",
+			err)
+		return nil, layer.WrapError(syscall.EIO)
+	}
+
+	if inode.Mode()&syscall.S_IFMT != syscall.S_IFREG {
+		log.Printf("OpenFile: inode is not a file!")
+		return nil, layer.WrapError(syscall.ENOSYS)
+	}
+
+	finode := inode.(*fileInode)
+	if finode.handle != nil {
+		finode.handle.IncRef()
+		return finode.handle, nil
+	}
+
+	f, err := openFileCachedFile(m, finode)
+	if err != nil {
+		log.Printf("failed to open file cache: %s", err)
+		return nil, layer.WrapError(err)
+	}
+
+	finode.handle = f
+	return f, nil
+
+}
+
+func (m *FileCache) RequestBlocks(nblocks uint64, priority int) (granted uint64) {
+	return nblocks
+}
+
+func (m *FileCache) ReleaseBlocks(nblocks uint64) {
 }
 
 func (m *FileCache) putAttr(path string, stat layer.FileStat) {
@@ -152,7 +197,7 @@ func (m *FileCache) PutNonExistant(path string) {
 	m.deleteInode(path)
 }
 
-func (m *FileCache) fetchAttr(path string) (layer.FileStat, layer.Error) {
+func (m *FileCache) fetchAttr(path string) (layer.FileStat, error) {
 	inode, err := m.getInode(path)
 	log.Printf("FetchAttr(%s): getInode -> %s, %s", path, inode, err)
 	if err != nil {
@@ -168,7 +213,11 @@ func (m *FileCache) FetchAttr(path string) (layer.FileStat, layer.Error) {
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	return m.fetchAttr(path)
+	stat, err := m.fetchAttr(path)
+	if err != nil {
+		return nil, layer.WrapError(err)
+	}
+	return stat, nil
 }
 
 func (m *FileCache) PutLink(path string, dest string) {
@@ -186,7 +235,7 @@ func (m *FileCache) PutLink(path string, dest string) {
 	m.writeback()
 }
 
-func (m *FileCache) FetchLink(path string) (dest string, err layer.Error) {
+func (m *FileCache) FetchLink(path string) (string, layer.Error) {
 	path = normalizePath(path)
 
 	m.lock.Lock()
@@ -195,7 +244,7 @@ func (m *FileCache) FetchLink(path string) (dest string, err layer.Error) {
 	inode, err := m.getInode(path)
 	log.Printf("FetchLink(%s): getInode -> %s, %s", path, inode, err)
 	if err != nil {
-		return "", err
+		return "", layer.WrapError(err)
 	}
 
 	if inode.Mode()&syscall.S_IFMT != syscall.S_IFLNK {
@@ -245,7 +294,7 @@ func (m *FileCache) FetchDir(path string) ([]layer.DirEntry, layer.Error) {
 
 	inode, err := m.getInode(path)
 	if err != nil {
-		return nil, err
+		return nil, layer.WrapError(err)
 	}
 
 	if inode.Mode()&syscall.S_IFMT != syscall.S_IFDIR {
