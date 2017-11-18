@@ -1,7 +1,7 @@
 Inode Format
 ############
 
-All numeric data is in **little endian**!
+All numeric data is in **little endian**, unless noted otherwise!
 
 *iff* is not a typo and means "if and only if".
 
@@ -95,6 +95,10 @@ Version 0x01
 
 Blockmap v1
 ~~~~~~~~~~~
+
+The blockmap is in **machine endianess**! This means that blockmap files are
+**not** portable among different machines. This may be fixed in a future version
+with an endianess flag and in-place conversion as needed.
 
 The blockmap consists of a blockinfo entry for each block in the file described
 by the inode. A block is 4096 bytes long. Each blockinfo entry has 16 bits.
