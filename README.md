@@ -1,5 +1,14 @@
+
+**NOTE:** This repository is only for archive purposes. DragonStash has
+since been [ported to C++](https://github.com/horazont/dragonstash-cpp).
+This repository will see no further development.
+
 DragonStash -- a Caching FUSE Overlay File System
 ===
+
+**NOTE:** This repository is only for archive purposes. DragonStash has
+since been [ported to C++](https://github.com/horazont/dragonstash-cpp).
+This repository will see no further development.
 
 `DragonStash` is a FUSE file system which implements a *transparent cache*
 over any other mounted file system or SFTP server. It helps you produce a
